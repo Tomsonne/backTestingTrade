@@ -23,3 +23,4 @@ def synthetic_dxy(component_frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
     out=pd.DataFrame(index=value.index);out["close"]=value;out["open"]=value.shift(1).fillna(value)
     out["high"]=out[["open","close"]].max(axis=1);out["low"]=out[["open","close"]].min(axis=1)
     return out
+
