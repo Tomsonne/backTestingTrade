@@ -6,7 +6,19 @@ from .indicators import indicator_matrix
 
 @dataclass
 class LabelEvent:
-    bar_index:int; time:pd.Timestamp; direction:str; count:int; a_entry_index:int|None=None; b_entry_index:int|None=None
+    bar_index:int
+    time:pd.Timestamp
+    direction:str
+    count:int
+    a_entry_index:int|None=None
+    b_entry_index:int|None=None
+    indicators:tuple[str,...]=()
+
+
+def pivot_available_index(center_index:int,right_bars:int)->int:
+    """Index where a visual pivot can first be known without repainting."""
+    if center_index<0 or right_bars<0:raise ValueError("pivot indices must be non-negative")
+    return center_index+right_bars
 
 def _ph(a,i,lb,rb):
     if i-lb<0 or i+rb>=len(a): return False
@@ -43,9 +55,20 @@ def _ind_clear(arr,current_i,old_i,mode):
         line-=diff
     return True
 
-def build_label_events(df,lb=5,rb=5,showlimit=1,check_cut_through=True):
+def build_label_events(
+    df,
+    lb=5,
+    rb=5,
+    showlimit=1,
+    check_cut_through=True,
+    indicator_names=None,
+    required_indicators=None,
+):
     if len(df)<100:return []
-    im=indicator_matrix(df); names=list(im.columns); inds={n:im[n].to_numpy(float) for n in names}
+    im=indicator_matrix(df)
+    names=list(im.columns) if indicator_names is None else [name for name in indicator_names if name in im.columns]
+    required=set(required_indicators or ())
+    inds={n:im[n].to_numpy(float) for n in names}
     high,low,close=df.mid_h.to_numpy(float),df.mid_l.to_numpy(float),df.mid_c.to_numpy(float); times=df.index
     last_ph=last_pl=None; events=[]
     for i in range(max(lb,rb),len(df)):
@@ -54,20 +77,22 @@ def build_label_events(df,lb=5,rb=5,showlimit=1,check_cut_through=True):
         if center>=lb and _pl(low,center,lb,rb):last_pl=center
         if last_ph is not None and i-lb>=0 and high[i]>=np.max(high[i-lb:i+1]) and high[i]>high[last_ph]:
             if _line_clear(close,i,last_ph,high[i],high[last_ph],"above"):
-                count=0
+                diverged=[]
                 for n in names:
                     a=inds[n]
                     if np.isnan(a[last_ph]) or np.isnan(a[i]):continue
-                    if a[last_ph]>a[i] and (not check_cut_through or _ind_clear(a,i,last_ph,"above")):count+=1
-                if count>=showlimit:events.append(LabelEvent(i,times[i],"short",int(count)))
+                    if a[last_ph]>a[i] and (not check_cut_through or _ind_clear(a,i,last_ph,"above")):diverged.append(n)
+                if len(diverged)>=showlimit and required.issubset(diverged):
+                    events.append(LabelEvent(i,times[i],"short",len(diverged),indicators=tuple(diverged)))
         if last_pl is not None and i-lb>=0 and low[i]<=np.min(low[i-lb:i+1]) and low[i]<low[last_pl]:
             if _line_clear(close,i,last_pl,low[i],low[last_pl],"below"):
-                count=0
+                diverged=[]
                 for n in names:
                     a=inds[n]
                     if np.isnan(a[last_pl]) or np.isnan(a[i]):continue
-                    if a[last_pl]<a[i] and (not check_cut_through or _ind_clear(a,i,last_pl,"below")):count+=1
-                if count>=showlimit:events.append(LabelEvent(i,times[i],"long",int(count)))
+                    if a[last_pl]<a[i] and (not check_cut_through or _ind_clear(a,i,last_pl,"below")):diverged.append(n)
+                if len(diverged)>=showlimit and required.issubset(diverged):
+                    events.append(LabelEvent(i,times[i],"long",len(diverged),indicators=tuple(diverged)))
     dirs={}
     for e in events:dirs.setdefault(e.bar_index,set()).add(e.direction)
     for e in events:
