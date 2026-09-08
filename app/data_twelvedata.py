@@ -7,6 +7,7 @@ import httpx
 import pandas as pd
 
 from .config import Settings
+from .data.base import normalize_canonical
 
 def _utc_timestamp(value: str) -> pd.Timestamp:
     ts = pd.Timestamp(value)
@@ -164,3 +165,21 @@ class CandleCache:
         out = out[~out.index.duplicated(keep="last")]
         out.to_parquet(path)
         return out[(out.index >= pd.Timestamp(start)) & (out.index < pd.Timestamp(end))].copy()
+
+
+class TwelveDataProvider:
+    """Compatibility adapter implementing the common provider boundary."""
+
+    name = "twelvedata"
+
+    def __init__(self, settings: Settings):
+        self.cache = CandleCache(settings, TwelveDataClient(settings))
+
+    def get(
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        interval: str = "1min",
+    ) -> pd.DataFrame:
+        return normalize_canonical(self.cache.get(instrument, start, end, interval))
