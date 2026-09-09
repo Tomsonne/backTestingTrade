@@ -1,0 +1,16 @@
+{
+  "source": "local result captured before Research Lab V2 refactor",
+  "period": {
+    "start": "2026-01-31T23:00:00+00:00",
+    "end": "2026-08-25T19:12:00+00:00"
+  },
+  "candidate_count": 235,
+  "trade_count": 181,
+  "trade_digest": "fa831ede4d255aa410c99f9d09ce5fe9f8c9caa015058b25db9543cea717555e",
+  "summary": [
+    {"variant": "A.0", "trades": 56, "wins": 20, "losses": 33, "total_r": 7.870000000000148},
+    {"variant": "A.1", "trades": 55, "wins": 19, "losses": 32, "total_r": 6.140000000000029},
+    {"variant": "B.0", "trades": 35, "wins": 17, "losses": 18, "total_r": 16.0},
+    {"variant": "B.1", "trades": 35, "wins": 16, "losses": 18, "total_r": 14.873333333333282}
+  ]
+}

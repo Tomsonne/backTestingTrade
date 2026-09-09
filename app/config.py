@@ -6,6 +6,11 @@ from zoneinfo import ZoneInfo
 import json
 import os
 
+from dotenv import load_dotenv
+
+
+load_dotenv(override=False)
+
 DEFAULT_SESSIONS = [
     {"name": "ASIA", "start": "23:00", "end": "06:00"},
     {"name": "BLUE", "start": "07:00", "end": "11:00"},
@@ -17,6 +22,7 @@ class SessionDef:
     name: str
     start: time
     end: time
+    timezone: str | None = None
 
     @property
     def overnight(self) -> bool:
@@ -35,7 +41,19 @@ def _env_bool(name: str, default: bool) -> bool:
 
 @dataclass
 class Settings:
-    # Twelve Data: aucune connexion à un compte de trading n'est requise.
+    data_provider: str = os.getenv("DATA_PROVIDER", "dukascopy").lower()
+    dxy_source: str = os.getenv("DXY_SOURCE", "dukascopy_direct").lower()
+    execution_price_mode: str = os.getenv("EXECUTION_PRICE_MODE", "bid_ask").lower()
+    volume_mode: str = os.getenv("VOLUME_MODE", "legacy_no_volume").lower()
+    data_validation_mode: str = os.getenv("DATA_VALIDATION_MODE", "strict").lower()
+    htf_anchor_timezone: str = os.getenv(
+        "HTF_ANCHOR_TIMEZONE", os.getenv("SESSION_TIMEZONE", "Europe/Paris")
+    )
+
+    dukascopy_base_url: str = os.getenv("DUKASCOPY_BASE_URL", "https://jetta.dukascopy.com/v1")
+    dukascopy_workers: int = int(os.getenv("DUKASCOPY_WORKERS", "4"))
+
+    # Twelve Data remains available as a migration fallback.
     twelve_data_api_key: str = os.getenv("TWELVE_DATA_API_KEY", "")
     twelve_data_base_url: str = os.getenv("TWELVE_DATA_BASE_URL", "https://api.twelvedata.com")
     twelve_data_credits_per_minute: int = int(os.getenv("TWELVE_DATA_CREDITS_PER_MINUTE", "8"))
@@ -46,6 +64,7 @@ class Settings:
     timezone: str = os.getenv("SESSION_TIMEZONE", "Europe/Paris")
     sessions_json: str = os.getenv("SESSIONS_JSON", json.dumps(DEFAULT_SESSIONS))
     backtest_start: str = os.getenv("BACKTEST_START", "2026-02-01")
+    backtest_end: str = os.getenv("BACKTEST_END", "")
 
     imbalance_min_adr_pct: float = float(os.getenv("IMBALANCE_MIN_ADR_PCT", "0.50"))
     adr_length: int = int(os.getenv("ADR_LENGTH", "15"))
@@ -80,6 +99,18 @@ class Settings:
     schedule_minute: int = int(os.getenv("SCHEDULE_MINUTE", "7"))
     pair_priority: tuple[str, ...] = ("EUR_USD", "GBP_USD")
 
+    def __post_init__(self) -> None:
+        allowed = {
+            "data_provider": ({"dukascopy", "twelvedata"}, self.data_provider),
+            "dxy_source": ({"dukascopy_direct", "synthetic"}, self.dxy_source),
+            "execution_price_mode": ({"mid", "bid_ask"}, self.execution_price_mode),
+            "volume_mode": ({"legacy_no_volume", "dukascopy_volume"}, self.volume_mode),
+            "data_validation_mode": ({"strict", "trace", "permissive"}, self.data_validation_mode),
+        }
+        for name, (choices, value) in allowed.items():
+            if value not in choices:
+                raise ValueError(f"{name} must be one of {sorted(choices)}; got {value!r}")
+
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
@@ -87,7 +118,10 @@ class Settings:
     @property
     def sessions(self) -> list[SessionDef]:
         raw = json.loads(self.sessions_json)
-        return [SessionDef(x["name"], _parse_time(x["start"]), _parse_time(x["end"])) for x in raw]
+        return [
+            SessionDef(x["name"], _parse_time(x["start"]), _parse_time(x["end"]), x.get("timezone"))
+            for x in raw
+        ]
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

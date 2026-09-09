@@ -1,22 +1,40 @@
 from __future__ import annotations
 from dataclasses import asdict,dataclass
-from datetime import datetime,timedelta,timezone
+from datetime import datetime,timezone
+import logging
+import numpy as np
 import pandas as pd
 from .config import Settings
-from .data_twelvedata import TwelveDataClient,CandleCache
-from .dxy import DXY_COMPONENTS,synthetic_dxy
+from .data.base import DataCoverageError,MarketDataProvider,utc_timestamp
+from .data.factory import create_provider
+from .dxy import DXY_COMPONENTS,direct_dxy,synthetic_dxy
 from .m1_divergence import build_label_events
 from .sessions import build_session_instances,session_slice
 from .zones import build_zones,find_active_zone
 from .indicators import indicator_matrix
 
 PAIRS=("EUR_USD","GBP_USD")
+LOGGER=logging.getLogger(__name__)
 
 @dataclass
 class Candidate:
-    variant:str; pair:str; direction:str; trade_date:str; session:str; previous_session:str; break_time:str; label_time:str; label_count:int; entry_time:str; entry_price:float; zone_tf:str; zone_bottom:float; zone_top:float; zone_formed_at:str; dxy_prev_high:float; dxy_prev_low:float; pair_prev_high:float; pair_prev_low:float
+    variant:str; pair:str; direction:str; trade_date:str; session:str; previous_session:str; break_time:str; label_time:str; label_count:int; entry_time:str; entry_price:float; zone_tf:str; zone_bottom:float; zone_top:float; zone_formed_at:str; dxy_prev_high:float; dxy_prev_low:float; pair_prev_high:float; pair_prev_low:float; execution_price_mode:str="mid"; entry_spread_pips:float=0.0
+    break_level:float|None=None; break_price:float|None=None; dxy_at_break:float|None=None
+    divergence_confirmed:bool=True; trigger_timeframe:str="M1"; indicators_diverged:tuple[str,...]=()
+    active_zones:tuple[dict,...]=(); trace:tuple[dict,...]=(); entry_bid:float|None=None; entry_ask:float|None=None
+    additional_spread_pips:float=0.0; slippage_pips:float=0.0
+    label_available_time:str|None=None
+    data_quality_status:str|None=None
+    missing_data_events:tuple[dict,...]=()
+    setup_id:str|None=None
 
-def _mid(raw):return raw[["mid_o","mid_h","mid_l","mid_c","volume"]].copy()
+def _mid(raw,volume_mode="legacy_no_volume"):
+    out=raw[["mid_o","mid_h","mid_l","mid_c"]].copy()
+    if volume_mode=="dukascopy_volume":
+        source="bid_volume" if "bid_volume" in raw.columns else "volume"
+        out["volume"]=pd.to_numeric(raw[source],errors="coerce") if source in raw.columns else np.nan
+    else:out["volume"]=np.nan
+    return out
 def _slice(df,s):return session_slice(df,s)
 def _ext(df,s,dxy=False):
     x=_slice(df,s)
@@ -34,19 +52,22 @@ def _breaks(pair_df,cur,prev_high,prev_low):
     if not lb.empty:out["long"]=lb.index[0]
     return out
 
-def _entry_price(raw,t,direction,spread_pips=0.0):
-    # Twelve Data fournit OHLC agrégé sans historique bid/ask. On applique un
-    # spread optionnel symétrique, désactivé par défaut plutôt que d'en inventer un.
-    mid=float(raw.loc[t].mid_o); half=(spread_pips*0.0001)/2
-    return mid+half if direction=="long" else mid-half
+def _entry_price(raw,t,direction,mode="mid",spread_pips=0.0):
+    row=raw.loc[t]
+    if mode=="bid_ask" and all(column in raw.columns for column in ("bid_o","ask_o")):
+        bid,ask=float(row.bid_o),float(row.ask_o)
+        if not np.isnan(bid) and not np.isnan(ask):
+            return (ask if direction=="long" else bid),(ask-bid)/.0001,"bid_ask"
+    mid=float(row.mid_o);half=(spread_pips*.0001)/2
+    return (mid+half if direction=="long" else mid-half),spread_pips,"mid"
 
 def _spread(settings,pair):
     return settings.eurusd_spread_pips if pair=="EUR_USD" else settings.gbpusd_spread_pips
 
 def generate_candidates(settings,pair,raw,dxy):
-    mid=_mid(raw)
+    mid=_mid(raw,settings.volume_mode)
     if mid.empty:return []
-    zones={tf:build_zones(mid,tf,settings.timezone,settings.imbalance_min_adr_pct,settings.adr_length) for tf in ("H2","H4")}
+    zones={tf:build_zones(mid,tf,settings.htf_anchor_timezone,settings.imbalance_min_adr_pct,settings.adr_length) for tf in ("H2","H4")}
     labels=build_label_events(mid,settings.lb,settings.rb,settings.showlimit,settings.check_cut_through)
     bydir={d:[e for e in labels if e.direction==d] for d in ("short","long")}
     instances=build_session_instances(mid.index.min().to_pydatetime(),mid.index.max().to_pydatetime(),settings.sessions,settings.timezone)
@@ -72,7 +93,8 @@ def generate_candidates(settings,pair,raw,dxy):
                         if settings.invalidate_if_dxy_confirms_before_entry and not _dxy_nonconfirm(dxy,cur,et,direction,dh,dl):continue
                         mo=float(mid.iloc[ei].mid_o); z=find_active_zone(zones[tf],et,mo,direction,settings.zone_direction_match)
                         if z is None:continue
-                        out.append(Candidate(variant,pair,direction,cur.trade_date.isoformat(),cur.name,prev.name,bt.isoformat(),e.time.isoformat(),e.count,et.isoformat(),_entry_price(raw,et,direction,_spread(settings,pair)),tf,z.bottom,z.top,z.formed_at.isoformat(),dh,dl,ph,pl))
+                        entry,observed_spread,actual_mode=_entry_price(raw,et,direction,settings.execution_price_mode,_spread(settings,pair))
+                        out.append(Candidate(variant,pair,direction,cur.trade_date.isoformat(),cur.name,prev.name,bt.isoformat(),e.time.isoformat(),e.count,et.isoformat(),entry,tf,z.bottom,z.top,z.formed_at.isoformat(),dh,dl,ph,pl,actual_mode,observed_spread))
                         break
     return out
 
@@ -80,15 +102,26 @@ def _sl_tp(settings,pair):
     return (settings.eurusd_sl_pips,settings.eurusd_tp_pips) if pair=="EUR_USD" else (settings.gbpusd_sl_pips,settings.gbpusd_tp_pips)
 
 def simulate_trade(settings,c,raw):
-    et=pd.Timestamp(c.entry_time); entry=c.entry_price; slp,tpp=_sl_tp(settings,c.pair); pip=.0001; spread=_spread(settings,c.pair); half=spread*pip/2
+    if settings.data_validation_mode == "trace":
+        from .research.gap_execution import simulate_trace_trade
+        return simulate_trace_trade(settings,c,raw,_simulate_observed_trade,getattr(settings,"gap_catalog",None))
+    return _simulate_observed_trade(settings,c,raw)
+
+def _simulate_observed_trade(settings,c,raw):
+    et=pd.Timestamp(c.entry_time); entry=c.entry_price; slp,tpp=_sl_tp(settings,c.pair); pip=.0001; spread=c.entry_spread_pips; half=spread*pip/2
+    extra_half=c.additional_spread_pips*pip/2; slippage=c.slippage_pips*pip
     if c.direction=="long":sl,tp=entry-slp*pip,entry+tpp*pip
     else:sl,tp=entry+slp*pip,entry-tpp*pip
     x=raw[(raw.index>=et)&(raw.index<=et+pd.Timedelta(minutes=settings.max_hold_minutes))]
     outcome="TIMEOUT"; xt=et; xp=entry
     for t,row in x.iterrows():
-        # reconstruit un bid/ask approximatif seulement si l'utilisateur fournit un spread
-        if c.direction=="long":
-            lo=float(row.mid_l)-half; hi=float(row.mid_h)-half; hit_sl=lo<=sl; hit_tp=hi>=tp
+        use_bid_ask=c.execution_price_mode=="bid_ask" and all(name in raw.columns for name in ("bid_l","bid_h","bid_c","ask_l","ask_h","ask_c"))
+        if c.direction=="long" and use_bid_ask:
+            lo=float(row.bid_l)-extra_half-slippage;hi=float(row.bid_h)-extra_half-slippage;hit_sl=lo<=sl;hit_tp=hi>=tp
+        elif c.direction=="long":
+            lo=float(row.mid_l)-half;hi=float(row.mid_h)-half;hit_sl=lo<=sl;hit_tp=hi>=tp
+        elif use_bid_ask:
+            lo=float(row.ask_l)+extra_half+slippage;hi=float(row.ask_h)+extra_half+slippage;hit_sl=hi>=sl;hit_tp=lo<=tp
         else:
             lo=float(row.mid_l)+half; hi=float(row.mid_h)+half; hit_sl=hi>=sl; hit_tp=lo<=tp
         if hit_sl and hit_tp:
@@ -98,8 +131,9 @@ def simulate_trade(settings,c,raw):
         if hit_tp:outcome="WIN";xt=t;xp=tp;break
     if outcome=="TIMEOUT" and not x.empty:
         xt=x.index[-1]; row=x.iloc[-1]
-        if c.direction=="long":xp=float(row.mid_c)-half; pnl=(xp-entry)/pip
-        else:xp=float(row.mid_c)+half; pnl=(entry-xp)/pip
+        use_bid_ask=c.execution_price_mode=="bid_ask" and "bid_c" in raw.columns and "ask_c" in raw.columns
+        if c.direction=="long":xp=(float(row.bid_c)-extra_half-slippage) if use_bid_ask else float(row.mid_c)-half;pnl=(xp-entry)/pip
+        else:xp=(float(row.ask_c)+extra_half+slippage) if use_bid_ask else float(row.mid_c)+half;pnl=(entry-xp)/pip
         r=pnl/slp
     elif outcome=="WIN":r=tpp/slp
     else:r=-1.0
@@ -114,18 +148,20 @@ def apply_money(settings,candidates,raw_by_pair):
             ds=[c for c in sub if c.trade_date==day]
             if not ds:continue
             t1=simulate_trade(settings,ds[0],raw_by_pair[ds[0].pair]); risk=settings.first_trade_risk_pct
-            t1.update(trade_number_day=1,risk_pct=risk,equity_before=equity,return_pct=t1["r_multiple"]*risk); equity*=1+t1["return_pct"]/100;t1["equity_after"]=equity;trades.append(t1)
+            t1.update(trade_number_day=1,risk_pct=risk,equity_before=equity,return_pct=t1["r_multiple"]*risk if t1["r_multiple"] is not None else None); equity*=1+(t1["return_pct"] or 0)/100;t1["equity_after"]=equity;trades.append(t1)
+            if t1["outcome"]=="INDETERMINATE":break
             if t1["outcome"]!="LOSS":continue
             ex=pd.Timestamp(t1["exit_time"]); rem=[c for c in ds[1:] if pd.Timestamp(c.entry_time)>ex]
             if not rem:continue
             t2=simulate_trade(settings,rem[0],raw_by_pair[rem[0].pair]); risk=settings.second_trade_risk_pct
-            t2.update(trade_number_day=2,risk_pct=risk,equity_before=equity,return_pct=t2["r_multiple"]*risk); equity*=1+t2["return_pct"]/100;t2["equity_after"]=equity;trades.append(t2)
+            t2.update(trade_number_day=2,risk_pct=risk,equity_before=equity,return_pct=t2["r_multiple"]*risk if t2["r_multiple"] is not None else None); equity*=1+(t2["return_pct"] or 0)/100;t2["equity_after"]=equity;trades.append(t2)
+            if t2["outcome"]=="INDETERMINATE":break
     return trades
 
 def summarize(trades,start_eq):
     out=[]
     for v in ("A.0","A.1","B.0","B.1"):
-        x=[t for t in trades if t["variant"]==v]
+        x=[t for t in trades if t["variant"]==v and t["outcome"]!="INDETERMINATE"]
         if not x:
             out.append({"variant":v,"trades":0,"wins":0,"losses":0,"win_rate":None,"total_r":0.0,"profit_factor":None,"net_return_pct":0.0,"max_drawdown_pct":0.0,"eurusd_trades":0,"gbpusd_trades":0});continue
         wins=sum(t["outcome"]=="WIN" for t in x); losses=sum(t["outcome"]=="LOSS" for t in x); decided=wins+losses; pos=sum(max(0,t["r_multiple"]) for t in x); neg=abs(sum(min(0,t["r_multiple"]) for t in x))
@@ -135,32 +171,79 @@ def summarize(trades,start_eq):
         out.append({"variant":v,"trades":len(x),"wins":wins,"losses":losses,"win_rate":100*wins/decided if decided else None,"total_r":sum(t["r_multiple"] for t in x),"profit_factor":pos/neg if neg else None,"net_return_pct":100*(final/start_eq-1),"max_drawdown_pct":abs(mdd),"eurusd_trades":sum(t["pair"]=="EUR_USD" for t in x),"gbpusd_trades":sum(t["pair"]=="GBP_USD" for t in x)})
     return out
 
-def run_backtest(settings:Settings):
-    settings.ensure_dirs(); client=TwelveDataClient(settings); cache=CandleCache(settings,client)
-    start=datetime.fromisoformat(settings.backtest_start).replace(tzinfo=settings.tz).astimezone(timezone.utc); end=datetime.now(timezone.utc)-timedelta(minutes=2)
-    raw={p:cache.get(p,start,end,"1min") for p in PAIRS}; comps={}
-    for s in DXY_COMPONENTS:
-        comps[s]=raw[s].copy() if s in raw else cache.get(s,start,end,"1min")
-    dxy=synthetic_dxy(comps); candidates=[]
-    for p in PAIRS:candidates.extend(generate_candidates(settings,p,raw[p],dxy))
+def _strategy_timestamp(value,settings):
+    ts=pd.Timestamp(value)
+    if ts.tzinfo is None:ts=ts.tz_localize(settings.timezone,ambiguous="raise",nonexistent="raise")
+    return ts.tz_convert("UTC")
+
+def _synthetic_dxy_from_provider(provider,raw,start,end):
+    comps={}
+    for symbol in DXY_COMPONENTS:
+        comps[symbol]=raw[symbol].copy() if symbol in raw else provider.get(symbol,start,end,"1min")
+    return synthetic_dxy(comps)
+
+def run_backtest(settings:Settings,provider:MarketDataProvider|None=None,now=None):
+    settings.ensure_dirs();provider=provider or create_provider(settings)
+    current=utc_timestamp(now or datetime.now(timezone.utc))
+    start=_strategy_timestamp(settings.backtest_start,settings)
+    end=_strategy_timestamp(settings.backtest_end,settings) if settings.backtest_end else current.floor("min")
+    if start>=end:raise ValueError("BACKTEST_START must be earlier than BACKTEST_END")
+    if hasattr(provider,"validation_mode"):provider.validation_mode=settings.data_validation_mode
+    if settings.data_validation_mode=="trace":
+        from .data.gaps import GapCatalog,TraceProvider
+        from .research.data_quality import annotate_candidate,quality_report
+        settings.gap_catalog=GapCatalog(start,end)
+        provider=TraceProvider(provider,settings.gap_catalog)
+    raw={p:provider.get(p,start,end,"1min") for p in PAIRS}
+    dxy_actual_source="synthetic"; revision_symbols=list(PAIRS)
+    if settings.dxy_source=="dukascopy_direct" and getattr(provider,"name","")=="dukascopy":
+        try:
+            dxy=direct_dxy(provider.get("DXY",start,end,"1min"));dxy_actual_source="dukascopy_direct";revision_symbols.append("DXY")
+        except DataCoverageError as exc:
+            LOGGER.warning("Direct Dukascopy DXY unavailable, trying synthetic fallback: %s",exc)
+            dxy=_synthetic_dxy_from_provider(provider,raw,start,end);revision_symbols.extend(DXY_COMPONENTS)
+    else:dxy=_synthetic_dxy_from_provider(provider,raw,start,end);revision_symbols.extend(DXY_COMPONENTS)
+    candidates=[]
+    for p in PAIRS:
+        generated=generate_candidates(settings,p,raw[p],dxy)
+        if settings.data_validation_mode=="trace":
+            settings.gap_catalog.dxy_symbols=["DXY"] if dxy_actual_source=="dukascopy_direct" else list(DXY_COMPONENTS)
+            instances=build_session_instances(start.to_pydatetime(),end.to_pydatetime(),settings.sessions,settings.timezone)
+            instances=[s for s in instances if not _slice(raw[p],s).empty and not _slice(dxy,s).empty]
+            for c in generated:
+                k=next(i for i,s in enumerate(instances) if s.name==c.session and s.start<=pd.Timestamp(c.entry_time)<s.end)
+                annotate_candidate(c,settings.gap_catalog,instances[k-1],instances[k],trigger=True,zones=True,dxy=True,history_index=raw[p].index)
+        candidates.extend(generated)
     trades=apply_money(settings,candidates,raw); summary=summarize(trades,settings.starting_equity)
 
-    active_indicators=list(indicator_matrix(_mid(raw["EUR_USD"])).columns) if not raw["EUR_USD"].empty else []
+    active_indicators=list(indicator_matrix(_mid(raw["EUR_USD"],settings.volume_mode)).columns) if not raw["EUR_USD"].empty else []
+    revision = provider.data_revision(revision_symbols, start, end) if hasattr(provider, "data_revision") else None
     return {
-        "generated_at":datetime.now(timezone.utc).isoformat(),"start":start.isoformat(),"end":end.isoformat(),"timezone":settings.timezone,
+        "generated_at":current.isoformat(),"start":start.isoformat(),"end":end.isoformat(),"timezone":settings.timezone,
+        "data_provider":getattr(provider,"name",settings.data_provider),"dxy_source":dxy_actual_source,
+        "execution_price_mode":settings.execution_price_mode,"volume_mode":settings.volume_mode,
+        "data_revision":revision,
+        **({"data_quality_report":quality_report(settings.gap_catalog.physical_gaps(),[asdict(c) for c in candidates],trades),
+             "data_warnings":[{"instrument":symbol,"rows":report["rows"],"unexpected_missing_minutes":report["unexpected_missing_minutes"],"gap_event_count":len(report["unexpected_gaps"])} for symbol,report in settings.gap_catalog.reports.items() if not report["is_valid"]],
+             "setup_quality":[asdict(c) for c in candidates]} if settings.data_validation_mode=="trace" else {}),
         "sessions":[{"name":s.name,"start":s.start.strftime("%H:%M"),"end":s.end.strftime("%H:%M")} for s in settings.sessions],
-        "summary":summary,"trades":trades,"candidate_count":len(candidates),"active_m1_indicators":active_indicators,
+        "summary":summary,"trades":trades,"candidate_count":len(candidates),
+        "candidate_counts":{
+            variant:sum(candidate.variant==variant for candidate in candidates)
+            for variant in ("A.0","A.1","B.0","B.1")
+        },
+        "candle_count":sum(len(frame) for frame in raw.values())+len(dxy),
+        "active_m1_indicators":active_indicators,
         "assumptions":[
-            "Source de prix: Twelve Data Forex /time_series en 1 minute.",
+            f"Source de prix: {getattr(provider,'name',settings.data_provider)} M1; cache historique séparé du backtest.",
             "ASIA 23:00-06:00 reste provisoire et configurable; BLUE 07:00-11:00 et RED 12:00-16:00 sont conservées.",
-            "DXY synthétique ICE calculé à partir de EUR/USD, USD/JPY, GBP/USD, USD/CAD, USD/SEK et USD/CHF Twelve Data.",
+            f"DXY utilisé: {dxy_actual_source}; le mode synthétique conserve la formule ICE existante.",
             "La divergence est invalidée si DXY casse finalement le niveau opposé avant l'entrée.",
             "A = label M1 fixé après 1 bougie; B = pivot M1 confirmé rb=5; .0 = H2; .1 = H4.",
-            "Twelve Data Forex n'inclut pas de volume dans /time_series: OBV, VW-MACD, CMF et MFI sont donc exclus plutôt que simulés.",
-            "Le label M1 Twelve Data est ainsi basé sur RSI, MACD, MACD Hist, Momentum, CCI, Stoch et DIosc.",
+            f"Mode volume: {settings.volume_mode}; aucun indicateur volume n'est réactivé silencieusement.",
             "Entrée à l'ouverture M1 suivant la confirmation, sans look-ahead.",
             "EURUSD 15/30 pips; GBPUSD 20/40 pips.",
-            "Spread historique non fourni par /time_series: 0 pip par défaut, réglable dans .env; un spread nul rend le résultat plus optimiste.",
+            f"Exécution: {settings.execution_price_mode}; BUY à l'ASK/sortie au BID et SELL au BID/sortie à l'ASK quand disponibles.",
             "Risque 2% au 1er trade; win = fin de journée; loss => 2e trade possible à 1%.",
         ]
     }

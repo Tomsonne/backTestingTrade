@@ -13,7 +13,7 @@ DXY_COMPONENTS = {
 DXY_CONSTANT = 50.14348112
 
 def synthetic_dxy(component_frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """DXY synthétique ICE calculé sur les clôtures M1 synchronisées Twelve Data."""
+    """DXY synthétique ICE calculé sur des clôtures M1 synchronisées."""
     closes=[]
     for symbol in DXY_COMPONENTS:
         closes.append(component_frames[symbol]["mid_c"].rename(symbol))
@@ -24,3 +24,14 @@ def synthetic_dxy(component_frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
     out["high"]=out[["open","close"]].max(axis=1);out["low"]=out[["open","close"]].min(axis=1)
     return out
 
+
+def direct_dxy(frame: pd.DataFrame) -> pd.DataFrame:
+    """Expose a canonical provider frame in the DXY shape used by the engine."""
+
+    required = {"mid_o", "mid_h", "mid_l", "mid_c"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Direct DXY frame is missing columns: {sorted(missing)}")
+    return frame[["mid_o", "mid_h", "mid_l", "mid_c"]].rename(
+        columns={"mid_o": "open", "mid_h": "high", "mid_l": "low", "mid_c": "close"}
+    )
