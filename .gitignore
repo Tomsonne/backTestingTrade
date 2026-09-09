@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Runtime databases and historical market data never belong in Git.
+/data/
+*.parquet
+*.sqlite3
