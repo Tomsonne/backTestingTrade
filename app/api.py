@@ -30,10 +30,7 @@ from .storage import (
     list_rejected,
     list_runs,
     list_trades,
-<<<<<<< HEAD
     list_missing_data_events,
-=======
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
     load_result,
     update_preset,
 )
@@ -265,7 +262,6 @@ def build_api_router(settings: Settings, executor: Executor) -> APIRouter:
         )}
 
     @router.get("/backtests/{run_id}/trades")
-<<<<<<< HEAD
     def run_trades(run_id: str, quality: str = "ALL"):
         if not get_run(settings.db_path, run_id):
             raise _not_found("run", run_id)
@@ -287,12 +283,6 @@ def build_api_router(settings: Settings, executor: Executor) -> APIRouter:
         return {"report": result.get("data_quality_report"),
                 "comparison": result.get("analysis", {}).get("quality_comparison"),
                 "events": list_missing_data_events(settings.db_path, run_id)}
-=======
-    def run_trades(run_id: str):
-        if not get_run(settings.db_path, run_id):
-            raise _not_found("run", run_id)
-        return list_trades(settings.db_path, run_id)
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
 
     @router.get("/backtests/{run_id}/rejected")
     def run_rejected(
@@ -328,7 +318,6 @@ def build_api_router(settings: Settings, executor: Executor) -> APIRouter:
             return _csv_response(list_rejected(settings.db_path, run_id), f"{run_id}-rejected.csv")
         if kind == "stats.csv":
             return _csv_response(get_stats(settings.db_path, run_id), f"{run_id}-stats.csv")
-<<<<<<< HEAD
         if kind == "gaps.csv":
             return _csv_response(list_missing_data_events(settings.db_path, run_id), f"{run_id}-gaps.csv")
         if kind == "quality.json":
@@ -340,13 +329,6 @@ def build_api_router(settings: Settings, executor: Executor) -> APIRouter:
                                    "rejected_setups": list_rejected(settings.db_path, run_id),
                                    "missing_data_events": list_missing_data_events(settings.db_path, run_id)}, f"{run_id}.json")
         raise HTTPException(400, "Unknown export. Use trades.csv, rejected.csv, stats.csv, gaps.csv, quality.json, config.json or run.json")
-=======
-        if kind == "config.json":
-            return _json_response(run["config"], f"{run_id}-config.json")
-        if kind == "run.json":
-            return _json_response(run, f"{run_id}.json")
-        raise HTTPException(400, "Unknown export. Use trades.csv, rejected.csv, stats.csv, config.json or run.json")
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
 
     @router.get("/data/status")
     def data_status():

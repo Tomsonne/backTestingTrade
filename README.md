@@ -255,7 +255,6 @@ Il correspond à des groupes ancrés à minuit dans ce fuseau, comme avant la mi
 
 Le validateur contrôle : UTC, ordre, doublons, OHLC, NaN/prix non positifs, volumes négatifs et minutes manquantes. Les week-ends, les horaires vérifiés des instruments, la maintenance quotidienne du DXY et les jours fériés fournis dans les métadonnées Dukascopy sont classés comme fermetures attendues.
 
-<<<<<<< HEAD
 Aucun `ffill()` n'est appliqué aux prix M1 manquants. Trois politiques sont disponibles dans **New Backtest → Execution & Validation → Validation** :
 
 - `strict` : comportement historique, toute minute ouverte manquante bloque le run.
@@ -273,9 +272,6 @@ python scripts/run_research.py --preset "Legacy A.0" --from 2026-02-01 --to 2026
 ```
 
 La politique de données est versionnée `TRACE_NEXT_AVAILABLE_CANDLE_V1`, indépendamment des règles legacy; l'application passe à `2.1.0`. Voir [l'architecture et la validation TRACE](docs/trace_data_quality.md) pour la migration SQLite additive, les limites, les exemples et les résultats du test local.
-=======
-Aucun `ffill()` n'est appliqué aux prix. En mode strict, une minute ouverte manquante interrompt le backtest avec la première période concernée. Le mode `permissive` existe pour l'exploration mais n'est pas recommandé pour les résultats officiels.
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
 
 ## Lancer le backtest
 
@@ -338,11 +334,7 @@ Les anciens `/api/config`, `/api/result` et `/api/run` restent disponibles.
 
 ## Troubleshooting
 
-<<<<<<< HEAD
 - `Backtest aborted ... missing M1 candle(s)` : réparer/télécharger la période ou sélectionner `trace` pour une recherche avec trous documentés, puis lancer un nouveau run. Le réglage ne modifie pas les anciens runs.
-=======
-- `Backtest aborted ... missing M1 candle(s)` : réparer/télécharger la période ou choisir consciemment le mode permissif. Le permissif avertit mais ne crée aucune bougie.
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
 - `Permissive gap limit exceeded` : la somme des minutes inattendues dépasse la limite de l'expérience; augmenter la limite seulement après inspection de Data Quality.
 - Cache vide : exécuter `python scripts/data_status.py`, puis `download_history.py` sur la période et les instruments voulus.
 - DXY direct incomplet : télécharger `DXY`, ou activer explicitement le fallback synthétique et ses six composants.
@@ -352,11 +344,7 @@ Les anciens `/api/config`, `/api/result` et `/api/run` restent disponibles.
 ## Limites connues
 
 - Le moteur utilise des OHLC M1, pas des ticks : l'ordre TP/SL intrabar est donc une hypothèse explicite.
-<<<<<<< HEAD
 - Un backtest V2 construit son warm-up d'indicateurs/ADR à l'intérieur de la période chargée. Les premiers jours peuvent ne produire aucune zone; une période de recherche doit inclure le warm-up désiré. Les entrées sont limitées aux dates choisies. En TRACE, des bougies manquantes à l'intérieur de la période dégradent un contexte encore exploitable; une session précédente hors de la période demandée reste rejetée.
-=======
-- Un backtest V2 construit son warm-up d'indicateurs/ADR à l'intérieur de la période chargée. Les premiers jours peuvent ne produire aucune zone; une période de recherche doit inclure le warm-up désiré. Les entrées sont néanmoins limitées aux dates choisies et une session précédente partiellement hors plage est rejetée.
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
 - Il n'existe pas encore de cache persistant d'indicateurs. Dans un run, chaque matrice/timeframe est calculé une seule fois et réutilisé; un cache inter-runs a été écarté pour V2 tant qu'un profilage n'en démontre pas le gain face au risque d'invalidation incorrecte.
 - Les volumes Dukascopy représentent l'activité au meilleur BID/ASK telle que décrite par le fournisseur, pas un volume centralisé Forex.
 - Le score d'overfitting et la stabilité de sensibilité sont des heuristiques de recherche; aucune validité prédictive n'est revendiquée.

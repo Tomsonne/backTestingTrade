@@ -301,19 +301,12 @@ class DukascopyProvider:
         report = validate_market_data(frame, instrument, start_ts, end_ts, metadata.get("holidays", []))
         if self.validation_mode == "strict":
             report.raise_for_errors(instrument)
-<<<<<<< HEAD
         elif self.validation_mode == "trace" and any((report.invalid_ohlc_rows, report.invalid_value_rows, report.duplicate_timestamps, report.out_of_order_timestamps)):
             raise ValueError(f"TRACE: invalid OHLC/values/order for {instrument}; repair required")
         elif not report.is_valid:
             first_gap = report.unexpected_gaps[0] if report.unexpected_gaps else None
             LOGGER.warning(
                 "[%s] non-strict validation: rows=%d invalid_ohlc=%d invalid_values=%d "
-=======
-        elif not report.is_valid:
-            first_gap = report.unexpected_gaps[0] if report.unexpected_gaps else None
-            LOGGER.warning(
-                "[%s] permissive validation: rows=%d invalid_ohlc=%d invalid_values=%d "
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
                 "duplicate_timestamps=%d out_of_order=%d missing_minutes=%d gap_events=%d%s",
                 instrument,
                 report.rows,
