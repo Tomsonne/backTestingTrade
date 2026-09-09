@@ -28,7 +28,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--from", dest="start", help="Override inclusive start date")
     parser.add_argument("--to", dest="end", help="Override inclusive end date")
     parser.add_argument("--name", help="Override run name")
+<<<<<<< HEAD
     parser.add_argument("--validation", choices=("strict", "trace", "permissive"), help="Override data-quality policy without changing trading rules")
+=======
+>>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
     parser.add_argument("--list-presets", action="store_true")
     return parser.parse_args()
 
@@ -58,8 +61,11 @@ def main() -> int:
         payload["period"]["end"] = args.end
     if args.name:
         payload["name"] = args.name
+<<<<<<< HEAD
     if args.validation:
         payload["validation"]["mode"] = args.validation
+=======
+>>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
     config = StrategyConfig.model_validate(payload)
     run_id = create_run(
         settings.db_path, config.model_dump(mode="json"), config.config_hash,

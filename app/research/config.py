@@ -194,7 +194,11 @@ class ExecutionConfig(ResearchModel):
 
 
 class DataValidationConfig(ResearchModel):
+<<<<<<< HEAD
     mode: Literal["strict", "trace", "permissive"] = "strict"
+=======
+    mode: Literal["strict", "permissive"] = "strict"
+>>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
     permissive_gap_limit_minutes: int = Field(default=5, ge=0, le=10080)
 
 
