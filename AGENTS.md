@@ -73,3 +73,16 @@ Avant de terminer une modification de code :
 
 ```bash
 python -m pytest -q
+```
+
+Si le legacy est touché :
+
+```bash
+python scripts/verify_legacy_golden.py
+```
+
+Pour une modification uniquement documentaire, ne pas lancer la suite complète sauf nécessité.
+
+Si l’UI change, vérifier également que le JavaScript reste valide.
+
+Une tâche est terminée lorsque le comportement demandé fonctionne, les tests appropriés passent, les erreurs restent visibles et le diff ne contient ni fuite temporelle, ni mutation destructive, ni secret.
