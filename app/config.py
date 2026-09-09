@@ -106,7 +106,7 @@ class Settings:
             "execution_price_mode": ({"mid", "bid_ask"}, self.execution_price_mode),
             "volume_mode": ({"legacy_no_volume", "dukascopy_volume"}, self.volume_mode),
             "data_validation_mode": ({"strict", "trace", "permissive"}, self.data_validation_mode),
-        }
+            }
         for name, (choices, value) in allowed.items():
             if value not in choices:
                 raise ValueError(f"{name} must be one of {sorted(choices)}; got {value!r}")
