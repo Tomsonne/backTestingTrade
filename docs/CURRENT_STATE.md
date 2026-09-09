@@ -18,7 +18,7 @@ Application version: `2.1.0`
 
 ```text
 pytest:
-82 passed
+84 passed
 1 warning Starlette/httpx préexistant
 ```
 
@@ -43,10 +43,16 @@ Des HTTP 429 peuvent apparaître pendant certaines réparations longues.
 
 Fiabiliser le pipeline historique :
 
+Déjà présent :
+
+- retries ;
+- exponential backoff.
+
+Travail restant / à améliorer :
+
 - rate limiting ;
-- `Retry-After` ;
-- exponential backoff ;
-- reprise idempotente ;
+- respect de `Retry-After` ;
+- vérifier et renforcer si nécessaire la reprise idempotente déjà fondée sur les jours téléchargés ;
 - réparation ciblée des gaps ;
 - validation après réparation.
 
