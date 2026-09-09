@@ -158,7 +158,6 @@ def init_db(path: Path) -> None:
                 metrics_json TEXT NOT NULL,
                 PRIMARY KEY(run_id, scope, dimension, bucket)
             );
-<<<<<<< HEAD
             CREATE TABLE IF NOT EXISTS run_data_gaps (
                 run_id TEXT NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
                 gap_id TEXT NOT NULL,
@@ -207,8 +206,6 @@ def init_db(path: Path) -> None:
                 ON missing_data_events(run_id,trade_id,gap_id) WHERE trade_id IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_missing_event_setup_gap
                 ON missing_data_events(run_id,setup_id,gap_id) WHERE setup_id IS NOT NULL;
-=======
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
             """
         )
 
@@ -404,7 +401,6 @@ def save_run_output(
         connection.execute("DELETE FROM trades WHERE run_id=?", (run_id,))
         connection.execute("DELETE FROM rejected_setups WHERE run_id=?", (run_id,))
         connection.execute("DELETE FROM run_stats WHERE run_id=?", (run_id,))
-<<<<<<< HEAD
         connection.execute("DELETE FROM setup_data_quality WHERE run_id=?", (run_id,))
         connection.execute("DELETE FROM run_data_gaps WHERE run_id=?", (run_id,))
         stored_trades, stored_rejected = [], []
@@ -412,11 +408,6 @@ def save_run_output(
             trade_id = str(trade.get("trade_id") or uuid4())
             payload = dict(trade, trade_id=trade_id, backtest_run_id=run_id)
             stored_trades.append(payload)
-=======
-        for sequence, trade in enumerate(trades):
-            trade_id = str(trade.get("trade_id") or uuid4())
-            payload = dict(trade, trade_id=trade_id, backtest_run_id=run_id)
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
             connection.execute(
                 """INSERT INTO trades(
                     run_id,trade_id,sequence,trade_date,pair,direction,session,previous_session,
@@ -435,10 +426,7 @@ def save_run_output(
         for sequence, setup in enumerate(rejected):
             setup_id = str(setup.get("setup_id") or uuid4())
             payload = dict(setup, setup_id=setup_id, backtest_run_id=run_id)
-<<<<<<< HEAD
             stored_rejected.append(payload)
-=======
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
             connection.execute(
                 """INSERT INTO rejected_setups(
                     run_id,setup_id,sequence,trade_date,pair,direction,session,reason,trace_json,data_json
@@ -449,11 +437,8 @@ def save_run_output(
                     _json(payload.get("trace", [])), _json(payload),
                 ),
             )
-<<<<<<< HEAD
         if result.get("data_quality_report") is not None:
             _save_data_quality(connection, run_id, result, stored_trades, stored_rejected)
-=======
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
         for item in stats:
             connection.execute(
                 "INSERT INTO run_stats(run_id,scope,dimension,bucket,metrics_json) VALUES(?,?,?,?,?)",
@@ -465,7 +450,6 @@ def save_run_output(
         )
 
 
-<<<<<<< HEAD
 def _save_data_quality(connection, run_id, result, trades, rejected):
     for gap in result["data_quality_report"].get("physical_gaps", []):
         connection.execute("INSERT INTO run_data_gaps VALUES(?,?,?,?,?,?,?)", (
@@ -509,8 +493,6 @@ def list_missing_data_events(path: Path, run_id: str) -> list[dict[str, Any]]:
              "trade_id": row["trade_id"], "setup_id": row["setup_id"]} for row in rows]
 
 
-=======
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
 def _run_row(row: sqlite3.Row, include_payload: bool = False) -> dict[str, Any]:
     compact_result = _loads(row["result_json"], {}) or {}
     output = {

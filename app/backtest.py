@@ -24,12 +24,9 @@ class Candidate:
     active_zones:tuple[dict,...]=(); trace:tuple[dict,...]=(); entry_bid:float|None=None; entry_ask:float|None=None
     additional_spread_pips:float=0.0; slippage_pips:float=0.0
     label_available_time:str|None=None
-<<<<<<< HEAD
     data_quality_status:str|None=None
     missing_data_events:tuple[dict,...]=()
     setup_id:str|None=None
-=======
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
 
 def _mid(raw,volume_mode="legacy_no_volume"):
     out=raw[["mid_o","mid_h","mid_l","mid_c"]].copy()
@@ -105,15 +102,12 @@ def _sl_tp(settings,pair):
     return (settings.eurusd_sl_pips,settings.eurusd_tp_pips) if pair=="EUR_USD" else (settings.gbpusd_sl_pips,settings.gbpusd_tp_pips)
 
 def simulate_trade(settings,c,raw):
-<<<<<<< HEAD
     if settings.data_validation_mode == "trace":
         from .research.gap_execution import simulate_trace_trade
         return simulate_trace_trade(settings,c,raw,_simulate_observed_trade,getattr(settings,"gap_catalog",None))
     return _simulate_observed_trade(settings,c,raw)
 
 def _simulate_observed_trade(settings,c,raw):
-=======
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
     et=pd.Timestamp(c.entry_time); entry=c.entry_price; slp,tpp=_sl_tp(settings,c.pair); pip=.0001; spread=c.entry_spread_pips; half=spread*pip/2
     extra_half=c.additional_spread_pips*pip/2; slippage=c.slippage_pips*pip
     if c.direction=="long":sl,tp=entry-slp*pip,entry+tpp*pip
@@ -194,15 +188,12 @@ def run_backtest(settings:Settings,provider:MarketDataProvider|None=None,now=Non
     start=_strategy_timestamp(settings.backtest_start,settings)
     end=_strategy_timestamp(settings.backtest_end,settings) if settings.backtest_end else current.floor("min")
     if start>=end:raise ValueError("BACKTEST_START must be earlier than BACKTEST_END")
-<<<<<<< HEAD
     if hasattr(provider,"validation_mode"):provider.validation_mode=settings.data_validation_mode
     if settings.data_validation_mode=="trace":
         from .data.gaps import GapCatalog,TraceProvider
         from .research.data_quality import annotate_candidate,quality_report
         settings.gap_catalog=GapCatalog(start,end)
         provider=TraceProvider(provider,settings.gap_catalog)
-=======
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
     raw={p:provider.get(p,start,end,"1min") for p in PAIRS}
     dxy_actual_source="synthetic"; revision_symbols=list(PAIRS)
     if settings.dxy_source=="dukascopy_direct" and getattr(provider,"name","")=="dukascopy":
@@ -213,7 +204,6 @@ def run_backtest(settings:Settings,provider:MarketDataProvider|None=None,now=Non
             dxy=_synthetic_dxy_from_provider(provider,raw,start,end);revision_symbols.extend(DXY_COMPONENTS)
     else:dxy=_synthetic_dxy_from_provider(provider,raw,start,end);revision_symbols.extend(DXY_COMPONENTS)
     candidates=[]
-<<<<<<< HEAD
     for p in PAIRS:
         generated=generate_candidates(settings,p,raw[p],dxy)
         if settings.data_validation_mode=="trace":
@@ -224,9 +214,6 @@ def run_backtest(settings:Settings,provider:MarketDataProvider|None=None,now=Non
                 k=next(i for i,s in enumerate(instances) if s.name==c.session and s.start<=pd.Timestamp(c.entry_time)<s.end)
                 annotate_candidate(c,settings.gap_catalog,instances[k-1],instances[k],trigger=True,zones=True,dxy=True,history_index=raw[p].index)
         candidates.extend(generated)
-=======
-    for p in PAIRS:candidates.extend(generate_candidates(settings,p,raw[p],dxy))
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
     trades=apply_money(settings,candidates,raw); summary=summarize(trades,settings.starting_equity)
 
     active_indicators=list(indicator_matrix(_mid(raw["EUR_USD"],settings.volume_mode)).columns) if not raw["EUR_USD"].empty else []
@@ -236,12 +223,9 @@ def run_backtest(settings:Settings,provider:MarketDataProvider|None=None,now=Non
         "data_provider":getattr(provider,"name",settings.data_provider),"dxy_source":dxy_actual_source,
         "execution_price_mode":settings.execution_price_mode,"volume_mode":settings.volume_mode,
         "data_revision":revision,
-<<<<<<< HEAD
         **({"data_quality_report":quality_report(settings.gap_catalog.physical_gaps(),[asdict(c) for c in candidates],trades),
              "data_warnings":[{"instrument":symbol,"rows":report["rows"],"unexpected_missing_minutes":report["unexpected_missing_minutes"],"gap_event_count":len(report["unexpected_gaps"])} for symbol,report in settings.gap_catalog.reports.items() if not report["is_valid"]],
              "setup_quality":[asdict(c) for c in candidates]} if settings.data_validation_mode=="trace" else {}),
-=======
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
         "sessions":[{"name":s.name,"start":s.start.strftime("%H:%M"),"end":s.end.strftime("%H:%M")} for s in settings.sessions],
         "summary":summary,"trades":trades,"candidate_count":len(candidates),
         "candidate_counts":{

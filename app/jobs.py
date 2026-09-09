@@ -20,11 +20,7 @@ from .storage import (
 )
 
 
-<<<<<<< HEAD
 APP_VERSION = "2.1.0"
-=======
-APP_VERSION = "2.0.0"
->>>>>>> 853804b008cb85b1a2c913966f2c28e9a257535a
 LOGGER = logging.getLogger(__name__)
 _LEGACY_LOCK = Lock()
 
