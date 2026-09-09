@@ -64,8 +64,11 @@ def connect(path: Path) -> Iterator[sqlite3.Connection]:
 def init_db(path: Path) -> None:
     with connect(path) as connection:
         connection.execute("PRAGMA journal_mode = WAL")
+        # executescript() commits any pending transaction before running its SQL.
+        # Begin inside the script; connect() commits or rolls back the whole schema.
         connection.executescript(
             """
+            BEGIN;
             CREATE TABLE IF NOT EXISTS state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL

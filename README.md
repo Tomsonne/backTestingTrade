@@ -264,6 +264,8 @@ permissive
 
 Mode conservé pour compatibilité avec les anciennes expériences.
 
+Dans Research V2, `permissive_gap_limit_minutes` vaut `5` par défaut et reste configurable. La limite est cumulative par paire sur la fenêtre validée ; le run bloque si elle est dépassée.
+
 Il ne fournit pas la même traçabilité détaillée que TRACE.
 
 ## CLI Research
