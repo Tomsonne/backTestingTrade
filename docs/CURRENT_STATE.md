@@ -18,11 +18,11 @@ Application version: `2.1.0`
 
 ```text
 pytest:
-84 passed
+109 passed
 1 warning Starlette/httpx préexistant
 ```
 
-Golden legacy :
+Golden legacy : dernière vérification précédente, non relancé pour ce chantier data.
 
 ```text
 status: PASS
@@ -45,16 +45,30 @@ Fiabiliser le pipeline historique :
 
 Déjà présent :
 
-- retries ;
-- exponential backoff.
+- retries bornés et exponential backoff ;
+- `Retry-After` en secondes ou date HTTP, avec délai partagé entre les workers du même client ;
+- une seule requête HTTP en vol par client, espacée d'au moins une seconde par défaut (`--request-interval`, configuration validée par Pydantic) ;
+- réparation ciblée via `--repair-gaps`, avec lecture des Parquet par mois, indépendamment de `completed_days` ;
+- ajout des seules M1 absentes dans la fenêtre demandée, sans remplacer les observations existantes, même avec `--force` ;
+- validation des observations avant écriture, contrôle des gaps après réparation et sortie CLI non nulle si des gaps persistent ;
+- reprise depuis les bougies réellement persistées et remise en cohérence du manifeste après interruption d'une réparation ;
+- logs résumés ; `gap_report.py --details` ou `--json` pour les détails explicites.
+
+Exemple de réparation (bornes UTC ; une date `--to` inclut la journée entière) :
+
+```bash
+python scripts/download_history.py --symbols EUR_USD --from 2024-01-02 --to 2024-01-03 --repair-gaps
+```
+
+L'endpoint historique utilisé renvoie une journée par côté BID/ASK : seules les journées touchées sont téléchargées, puis filtrées aux minutes absentes. Les fermetures prévues et jours fériés des métadonnées ne sont pas réparés comme des gaps.
+
+Ces comportements sont vérifiés par tests simulés ; aucune réparation du cache historique local ni mesure réelle de baisse des 429 n'a été effectuée pendant ce chantier.
 
 Travail restant / à améliorer :
 
-- rate limiting ;
-- respect de `Retry-After` ;
-- vérifier et renforcer si nécessaire la reprise idempotente déjà fondée sur les jours téléchargés ;
-- réparation ciblée des gaps ;
-- validation après réparation.
+- mesurer le débit et les 429 sur une réparation réelle bornée, puis ajuster l'intervalle si nécessaire ;
+- réparer et valider les gaps historiques encore présents ;
+- éviter plusieurs téléchargements simultanés dans des processus distincts : le limiteur et les écritures du cache ne sont pas coordonnés entre processus.
 
 ## Do not optimize yet
 

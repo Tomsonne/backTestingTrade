@@ -10,6 +10,8 @@ from typing import Any
 import pandas as pd
 
 from .base import empty_canonical_frame, normalize_canonical, utc_timestamp
+from .validation import validate_market_data
+from .provider_missing import ProviderMissingConfirmation
 
 
 class PartitionedParquetStore:
@@ -83,6 +85,46 @@ class PartitionedParquetStore:
     def partial_days(self, instrument: str) -> set[str]:
         return set(self.load_manifest(instrument).get("partial_days", []))
 
+    def confirmation_path(self, instrument: str, month: str) -> Path:
+        return self.symbol_root(instrument) / "provider_missing" / f"{month}.json"
+
+    def load_confirmations(self, instrument: str, start, end) -> list[ProviderMissingConfirmation]:
+        start, end = utc_timestamp(start), utc_timestamp(end)
+        if start >= end:
+            return []
+        first = start.tz_localize(None).to_period("M")
+        last = (end - pd.Timedelta(nanoseconds=1)).tz_localize(None).to_period("M")
+        records = []
+        for month in pd.period_range(first, last, freq="M"):
+            path = self.confirmation_path(instrument, str(month))
+            if not path.exists():
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("version") != "DUKASCOPY_MISSING_V1" or payload.get("symbol") != instrument:
+                raise ValueError("Invalid provider-missing evidence file")
+            for item in payload["confirmations"]:
+                record = ProviderMissingConfirmation.model_validate(item)
+                if record.symbol != instrument:
+                    raise ValueError("Provider-missing evidence symbol mismatch")
+                if start <= record.timestamp < end:
+                    records.append(record)
+        return records
+
+    def save_confirmations(self, instrument: str, records: list[ProviderMissingConfirmation]) -> None:
+        for month in sorted({pd.Timestamp(r.timestamp).strftime("%Y-%m") for r in records}):
+            period = pd.Period(month, freq="M")
+            left, right = period.start_time.tz_localize("UTC"), (period + 1).start_time.tz_localize("UTC")
+            existing = {r.timestamp: r for r in self.load_confirmations(instrument, left, right)}
+            for record in records:
+                if record.symbol != instrument:
+                    raise ValueError("Provider-missing evidence symbol mismatch")
+                if left <= record.timestamp < right:
+                    existing[record.timestamp] = record
+            self._atomic_json(self.confirmation_path(instrument, month), {
+                "version": "DUKASCOPY_MISSING_V1", "symbol": instrument,
+                "confirmations": [existing[t].model_dump(mode="json") for t in sorted(existing)],
+            })
+
     def write_day(
         self,
         instrument: str,
@@ -97,13 +139,19 @@ class PartitionedParquetStore:
         month = day_start.strftime("%Y-%m")
         path = self.partition_path(instrument, month)
         existing = pd.read_parquet(path) if path.exists() else empty_canonical_frame()
+        # Validate observations even when missing minutes are allowed. An empty
+        # coverage window checks values/order without rejecting genuine gaps.
+        for source in (existing, frame):
+            validate_market_data(source, instrument, day_start, day_start).raise_for_errors(instrument)
+        if not frame.empty and ((frame.index < day_start) | (frame.index >= day_end)).any():
+            raise ValueError("write_day received candles outside the requested UTC day")
         existing = normalize_canonical(existing)
-        existing = existing.loc[(existing.index < day_start) | (existing.index >= day_end)]
-        combined = normalize_canonical(pd.concat([existing, normalize_canonical(frame)]))
-        if combined.empty:
-            if path.exists():
-                path.unlink()
-        else:
+        incoming = normalize_canonical(frame)
+        incoming = incoming.loc[~incoming.index.isin(existing.index)]
+        combined = normalize_canonical(pd.concat([existing, incoming]))
+        # Existing observations always win, including forced downloads and imports.
+        # Never replace a full day with a shorter/empty provider response.
+        if not incoming.empty:
             self._atomic_parquet(path, combined)
 
         manifest = self.load_manifest(instrument)

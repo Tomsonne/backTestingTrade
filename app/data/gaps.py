@@ -5,7 +5,7 @@ from hashlib import sha256
 
 import pandas as pd
 
-from .validation import validate_market_data
+from .validation import classify_provider_missing, validate_market_data
 
 MINUTE = pd.Timedelta(minutes=1)
 CATEGORIES = (
@@ -42,8 +42,9 @@ class GapCatalog:
         self.reports = {}
         self.dxy_symbols = []
 
-    def add(self, symbol, frame, holidays=()):
+    def add(self, symbol, frame, holidays=(), provider_confirmed=()):
         report = validate_market_data(frame, symbol, self.start, self.end, holidays)
+        classify_provider_missing(report, provider_confirmed)
         if any((report.invalid_ohlc_rows, report.invalid_value_rows,
                 report.duplicate_timestamps, report.out_of_order_timestamps)):
             # TRACE relaxes missing coverage only, never corrupt executable prices.
@@ -103,5 +104,6 @@ class TraceProvider:
             raise ValueError("TRACE source loads must use canonical M1")
         frame = self.provider.get(instrument, start, end, interval)
         metadata = self.provider._metadata(instrument, download=False) if hasattr(self.provider, "_metadata") else {}
-        self.catalog.add(instrument, frame, (metadata or {}).get("holidays", []))
+        confirmations = self.provider.store.load_confirmations(instrument, self.catalog.start, self.catalog.end) if hasattr(getattr(self.provider, "store", None), "load_confirmations") else []
+        self.catalog.add(instrument, frame, (metadata or {}).get("holidays", []), (r.timestamp for r in confirmations))
         return frame

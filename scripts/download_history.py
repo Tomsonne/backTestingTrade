@@ -35,9 +35,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols", nargs="+", choices=sorted(DUKASCOPY_SYMBOLS))
     parser.add_argument("--all-required", action="store_true", help="Use pairs plus configured DXY source")
     parser.add_argument("--interval", default="1min", choices=("1min", "M1"))
-    parser.add_argument("--force", action="store_true", help="Redownload already completed UTC days")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--force", action="store_true", help="Refetch completed days, preserving existing observations")
+    mode.add_argument("--repair-gaps", action="store_true", help="Fetch only days with missing open M1; insert only missing observations in the requested window")
+    parser.add_argument("--confirm-provider-missing", action="store_true", help="During repair, confirm BOTH_MISSING with two successful raw BID/ASK fetches (completed UTC days only)")
+    parser.add_argument("--recheck-provider-missing", action="store_true", help="Explicitly recheck stored confirmations; requires --confirm-provider-missing")
+    parser.add_argument("--request-interval", type=float, default=1.0, help="Minimum seconds between HTTP requests (default: 1; one request in flight)")
     parser.add_argument("--validate", action="store_true", help="Run strict validation after download")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if (args.confirm_provider_missing or args.recheck_provider_missing) and not args.repair_gaps:
+        parser.error("Provider confirmation options require --repair-gaps")
+    if args.recheck_provider_missing and not args.confirm_provider_missing:
+        parser.error("--recheck-provider-missing requires --confirm-provider-missing")
+    return args
 
 
 def main() -> int:
@@ -45,7 +55,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings()
     symbols = args.symbols or required_symbols(settings)
-    client = DukascopyClient(base_url=settings.dukascopy_base_url)
+    client = DukascopyClient(base_url=settings.dukascopy_base_url, request_interval_seconds=args.request_interval)
     provider = DukascopyProvider(
         settings.data_dir,
         validation_mode="strict" if args.validate else settings.data_validation_mode,
@@ -55,7 +65,12 @@ def main() -> int:
     )
     start, end = _start(args.start), _inclusive_end(args.end)
     try:
-        summary = provider.download(symbols, start, end, force=args.force, validate=args.validate)
+        if args.repair_gaps:
+            summary = provider.repair_gaps(symbols, start, end,
+                                          confirm_provider_missing=args.confirm_provider_missing,
+                                          recheck_provider_missing=args.recheck_provider_missing)
+        else:
+            summary = provider.download(symbols, start, end, force=args.force, validate=args.validate)
         if args.validate:
             for symbol in symbols:
                 frame = provider.get(symbol, start, min(end, pd.Timestamp.now(tz="UTC").floor("min")), "1min")
@@ -64,6 +79,12 @@ def main() -> int:
         client.close()
     for symbol, stats in summary.items():
         logging.info("[%s] %s", symbol, stats)
+    if args.repair_gaps:
+        if any(stats["unconfirmed_missing_after"] for stats in summary.values()):
+            return 1
+        if any(stats["provider_confirmed_missing"] for stats in summary.values()):
+            logging.warning("Repair finished with PROVIDER_CONFIRMED_MISSING: no automatic refetch; STRICT coverage remains incomplete")
+            return 2
     return 0
 
 
