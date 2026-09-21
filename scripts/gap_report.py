@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -25,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--from", dest="start", required=True, help="UTC start date/time")
     parser.add_argument("--to", dest="end", required=True, help="UTC end date/time")
     parser.add_argument("--json", action="store_true", help="Emit the results as JSON")
+    parser.add_argument("--details", action="store_true", help="Print every gap; default output is summarized")
     return parser.parse_args()
 
 
@@ -40,6 +40,9 @@ def _build_summary(report, start: pd.Timestamp, end: pd.Timestamp) -> dict:
         "total_events": 0,
         "window": {"start": start.isoformat(), "end": end.isoformat()},
         "gaps": [],
+        "provider_confirmed_missing": report.expected_provider_gap_minutes,
+        "unconfirmed_missing_minutes": report.unconfirmed_missing_minutes,
+        "provider_confirmed_gaps": report.to_dict()["provider_confirmed_gaps"],
     }
 
     for gap in report.unexpected_gaps:
@@ -85,12 +88,16 @@ def _build_summary(report, start: pd.Timestamp, end: pd.Timestamp) -> dict:
     return summary
 
 
-def _print_bucket(label: str, bucket: dict) -> None:
+def _print_bucket(label: str, bucket: dict, details: bool = False) -> None:
     print(f"=== {label} ===")
     print(f"Missing minutes: {bucket['minutes']}")
     print(f"Gap events: {bucket['events']}")
     if not bucket["days"]:
         print("No unexpected M1 gaps in this bucket.")
+        print()
+        return
+    if not details:
+        print("Use --details to list gaps.")
         print()
         return
 
@@ -115,7 +122,9 @@ def main() -> int:
         raise SystemExit("--to must be after --from")
 
     frame = provider.get(args.symbol, start, end, "1min")
-    report = validate_market_data(frame, args.symbol, start, end)
+    metadata = provider._metadata(args.symbol, download=False) or {}
+    report = validate_market_data(frame, args.symbol, start, end, metadata.get("holidays", []))
+    provider.classify_report(args.symbol, report, start, end)
     summary = _build_summary(report, start, end)
 
     if args.json:
@@ -126,10 +135,12 @@ def main() -> int:
     print(f"Window: {start.isoformat()} -> {end.isoformat()}")
     print(f"Unexpected missing minutes total: {summary['total_minutes']}")
     print(f"Unexpected gap events total: {summary['total_events']}")
+    print(f"PROVIDER_CONFIRMED_MISSING: {summary['provider_confirmed_missing']} (included in total; not market closures)")
+    print(f"Unconfirmed missing minutes: {summary['unconfirmed_missing_minutes']}")
     print()
 
-    _print_bucket("Weekday", summary["weekday"])
-    _print_bucket("Weekend", summary["weekend"])
+    _print_bucket("Weekday", summary["weekday"], args.details)
+    _print_bucket("Weekend", summary["weekend"], args.details)
     return 0
 
 

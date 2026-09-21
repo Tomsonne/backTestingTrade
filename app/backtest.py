@@ -24,6 +24,9 @@ class Candidate:
     active_zones:tuple[dict,...]=(); trace:tuple[dict,...]=(); entry_bid:float|None=None; entry_ask:float|None=None
     additional_spread_pips:float=0.0; slippage_pips:float=0.0
     label_available_time:str|None=None
+    data_quality_status:str|None=None
+    missing_data_events:tuple[dict,...]=()
+    setup_id:str|None=None
 
 def _mid(raw,volume_mode="legacy_no_volume"):
     out=raw[["mid_o","mid_h","mid_l","mid_c"]].copy()
@@ -99,6 +102,12 @@ def _sl_tp(settings,pair):
     return (settings.eurusd_sl_pips,settings.eurusd_tp_pips) if pair=="EUR_USD" else (settings.gbpusd_sl_pips,settings.gbpusd_tp_pips)
 
 def simulate_trade(settings,c,raw):
+    if settings.data_validation_mode == "trace":
+        from .research.gap_execution import simulate_trace_trade
+        return simulate_trace_trade(settings,c,raw,_simulate_observed_trade,getattr(settings,"gap_catalog",None))
+    return _simulate_observed_trade(settings,c,raw)
+
+def _simulate_observed_trade(settings,c,raw):
     et=pd.Timestamp(c.entry_time); entry=c.entry_price; slp,tpp=_sl_tp(settings,c.pair); pip=.0001; spread=c.entry_spread_pips; half=spread*pip/2
     extra_half=c.additional_spread_pips*pip/2; slippage=c.slippage_pips*pip
     if c.direction=="long":sl,tp=entry-slp*pip,entry+tpp*pip
@@ -139,18 +148,20 @@ def apply_money(settings,candidates,raw_by_pair):
             ds=[c for c in sub if c.trade_date==day]
             if not ds:continue
             t1=simulate_trade(settings,ds[0],raw_by_pair[ds[0].pair]); risk=settings.first_trade_risk_pct
-            t1.update(trade_number_day=1,risk_pct=risk,equity_before=equity,return_pct=t1["r_multiple"]*risk); equity*=1+t1["return_pct"]/100;t1["equity_after"]=equity;trades.append(t1)
+            t1.update(trade_number_day=1,risk_pct=risk,equity_before=equity,return_pct=t1["r_multiple"]*risk if t1["r_multiple"] is not None else None); equity*=1+(t1["return_pct"] or 0)/100;t1["equity_after"]=equity;trades.append(t1)
+            if t1["outcome"]=="INDETERMINATE":break
             if t1["outcome"]!="LOSS":continue
             ex=pd.Timestamp(t1["exit_time"]); rem=[c for c in ds[1:] if pd.Timestamp(c.entry_time)>ex]
             if not rem:continue
             t2=simulate_trade(settings,rem[0],raw_by_pair[rem[0].pair]); risk=settings.second_trade_risk_pct
-            t2.update(trade_number_day=2,risk_pct=risk,equity_before=equity,return_pct=t2["r_multiple"]*risk); equity*=1+t2["return_pct"]/100;t2["equity_after"]=equity;trades.append(t2)
+            t2.update(trade_number_day=2,risk_pct=risk,equity_before=equity,return_pct=t2["r_multiple"]*risk if t2["r_multiple"] is not None else None); equity*=1+(t2["return_pct"] or 0)/100;t2["equity_after"]=equity;trades.append(t2)
+            if t2["outcome"]=="INDETERMINATE":break
     return trades
 
 def summarize(trades,start_eq):
     out=[]
     for v in ("A.0","A.1","B.0","B.1"):
-        x=[t for t in trades if t["variant"]==v]
+        x=[t for t in trades if t["variant"]==v and t["outcome"]!="INDETERMINATE"]
         if not x:
             out.append({"variant":v,"trades":0,"wins":0,"losses":0,"win_rate":None,"total_r":0.0,"profit_factor":None,"net_return_pct":0.0,"max_drawdown_pct":0.0,"eurusd_trades":0,"gbpusd_trades":0});continue
         wins=sum(t["outcome"]=="WIN" for t in x); losses=sum(t["outcome"]=="LOSS" for t in x); decided=wins+losses; pos=sum(max(0,t["r_multiple"]) for t in x); neg=abs(sum(min(0,t["r_multiple"]) for t in x))
@@ -177,6 +188,15 @@ def run_backtest(settings:Settings,provider:MarketDataProvider|None=None,now=Non
     start=_strategy_timestamp(settings.backtest_start,settings)
     end=_strategy_timestamp(settings.backtest_end,settings) if settings.backtest_end else current.floor("min")
     if start>=end:raise ValueError("BACKTEST_START must be earlier than BACKTEST_END")
+    if settings.data_validation_mode!="trace" and hasattr(provider,"validation_mode"):provider.validation_mode=settings.data_validation_mode
+    if settings.data_validation_mode=="trace":
+        from .data.gaps import GapCatalog,TraceProvider
+        from .research.data_quality import annotate_candidate,quality_report
+        if isinstance(provider,TraceProvider) and provider.catalog is not None:
+            settings.gap_catalog=provider.catalog
+        else:
+            settings.gap_catalog=GapCatalog(start,end)
+            provider=TraceProvider(provider,settings.gap_catalog)
     raw={p:provider.get(p,start,end,"1min") for p in PAIRS}
     dxy_actual_source="synthetic"; revision_symbols=list(PAIRS)
     if settings.dxy_source=="dukascopy_direct" and getattr(provider,"name","")=="dukascopy":
@@ -187,7 +207,16 @@ def run_backtest(settings:Settings,provider:MarketDataProvider|None=None,now=Non
             dxy=_synthetic_dxy_from_provider(provider,raw,start,end);revision_symbols.extend(DXY_COMPONENTS)
     else:dxy=_synthetic_dxy_from_provider(provider,raw,start,end);revision_symbols.extend(DXY_COMPONENTS)
     candidates=[]
-    for p in PAIRS:candidates.extend(generate_candidates(settings,p,raw[p],dxy))
+    for p in PAIRS:
+        generated=generate_candidates(settings,p,raw[p],dxy)
+        if settings.data_validation_mode=="trace":
+            settings.gap_catalog.dxy_symbols=["DXY"] if dxy_actual_source=="dukascopy_direct" else list(DXY_COMPONENTS)
+            instances=build_session_instances(start.to_pydatetime(),end.to_pydatetime(),settings.sessions,settings.timezone)
+            instances=[s for s in instances if not _slice(raw[p],s).empty and not _slice(dxy,s).empty]
+            for c in generated:
+                k=next(i for i,s in enumerate(instances) if s.name==c.session and s.start<=pd.Timestamp(c.entry_time)<s.end)
+                annotate_candidate(c,settings.gap_catalog,instances[k-1],instances[k],trigger=True,zones=True,dxy=True,history_index=raw[p].index)
+        candidates.extend(generated)
     trades=apply_money(settings,candidates,raw); summary=summarize(trades,settings.starting_equity)
 
     active_indicators=list(indicator_matrix(_mid(raw["EUR_USD"],settings.volume_mode)).columns) if not raw["EUR_USD"].empty else []
@@ -197,6 +226,9 @@ def run_backtest(settings:Settings,provider:MarketDataProvider|None=None,now=Non
         "data_provider":getattr(provider,"name",settings.data_provider),"dxy_source":dxy_actual_source,
         "execution_price_mode":settings.execution_price_mode,"volume_mode":settings.volume_mode,
         "data_revision":revision,
+        **({"data_quality_report":quality_report(settings.gap_catalog.physical_gaps(),[asdict(c) for c in candidates],trades),
+             "data_warnings":[{"instrument":symbol,"rows":report["rows"],"unexpected_missing_minutes":report["unexpected_missing_minutes"],"gap_event_count":len(report["unexpected_gaps"])} for symbol,report in settings.gap_catalog.reports.items() if not report["is_valid"]],
+             "setup_quality":[asdict(c) for c in candidates]} if settings.data_validation_mode=="trace" else {}),
         "sessions":[{"name":s.name,"start":s.start.strftime("%H:%M"),"end":s.end.strftime("%H:%M")} for s in settings.sessions],
         "summary":summary,"trades":trades,"candidate_count":len(candidates),
         "candidate_counts":{

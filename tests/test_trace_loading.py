@@ -49,18 +49,27 @@ def should_raise_data_coverage_error_when_strict_has_missing_m1_candles(tmp_path
     assert provider.validation_reports['EUR_USD'].unexpected_missing_minutes == 2
 
 
-def should_continue_research_engine_when_trace_provider_reports_gaps(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize('legacy', [False, True])
+def should_continue_research_engine_when_trace_provider_reports_gaps(tmp_path, monkeypatch, caplog, legacy):
     frame, _, _ = dataset()
     provider = provider_for(tmp_path, monkeypatch, frame)
     config = custom_config(); config.validation.mode = 'trace'; config.divergence.enabled = True
     config.instruments.pairs = ['EUR_USD', 'GBP_USD']
+    if legacy:
+        config = builtin_presets()[0]
+        config.period.start = config.period.end = date(2024, 1, 2)
+        config.validation.mode = 'trace'
     stages = []
     with caplog.at_level(logging.INFO):
         output = run_research_backtest(config, Settings(data_dir=tmp_path, db_path=tmp_path/'lab.sqlite3'), provider,
                                       progress=lambda step, _: stages.append(step))
-    assert 'GENERATING_SETUPS' in stages and 'CALCULATING_STATISTICS' in stages
+    assert 'LOADING_DATA' in stages and 'CALCULATING_STATISTICS' in stages
+    if not legacy:
+        assert 'GENERATING_SETUPS' in stages
     assert set(output.result['coverage']) == {'EUR_USD', 'GBP_USD', 'DXY'}
     assert all(c['missing_market_minutes'] > 0 for c in output.result['coverage'].values())
+    quality = output.result['data_quality_report']
+    assert quality['missing_candles'] == sum(c['missing_market_minutes'] for c in output.result['coverage'].values())
     assert 'Validation policy: TRACE' in caplog.text
     assert 'Coverage validation: NON-BLOCKING' in caplog.text
     assert 'Gap catalogue: created' in caplog.text
@@ -156,7 +165,18 @@ def should_preserve_trade_results_when_trace_data_has_no_gaps(tmp_path, monkeypa
     config.validation.mode = 'trace'
     traced = run_research_backtest(config, settings, provider)
     from app.storage import _json
-    assert strict.trades and _json(strict.trades) == _json(traced.trades)
+    # TRACE now adds quality annotations; every other trade field stays identical.
+    quality_fields = {'setup_id', 'data_quality_status', 'missing_data_events', 'missing_candles_count',
+                      'missing_gap_count', 'outcome_source', 'exit_observation_source', 'gap_policy'}
+    def without_quality(trades):
+        rows = deepcopy(trades)
+        for row in rows:
+            for key in quality_fields:
+                row.pop(key, None)
+            row['trace'] = [step for step in row['trace'] if step['condition'] != 'Data quality']
+        return rows
+    assert strict.trades and _json(without_quality(strict.trades)) == _json(without_quality(traced.trades))
+    assert all(t['data_quality_status'] == 'COMPLETE' and not t['missing_data_events'] for t in traced.trades)
     assert strict.result['summary'] == traced.result['summary']
 
 
