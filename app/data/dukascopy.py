@@ -17,7 +17,7 @@ import pandas as pd
 from .base import DataProviderError, empty_canonical_frame, normalize_canonical, utc_timestamp
 from .cache import PartitionedParquetStore
 from .resampler import resample_market_data
-from .validation import validate_market_data
+from .validation import VALIDATION_RUN_ID, validate_market_data, validation_policy
 
 
 LOGGER = logging.getLogger(__name__)
@@ -181,6 +181,7 @@ class DukascopyProvider:
     ):
         self.store = PartitionedParquetStore(Path(data_dir) / "dukascopy")
         self.validation_mode = validation_mode
+        self.validation_reports = {}
         self.anchor_timezone = anchor_timezone
         self.client = client
         self.workers = max(1, workers)
@@ -293,15 +294,32 @@ class DukascopyProvider:
                 )
         return result
 
-    def get(self, instrument: str, start, end, interval: str = "1min") -> pd.DataFrame:
+    @property
+    def validation_mode(self):
+        return self._validation_mode
+
+    @validation_mode.setter
+    def validation_mode(self, value):
+        self._validation_mode = validation_policy(value)
+
+    def get(self, instrument: str, start, end, interval: str = "1min", *, validation_policy: str | None = None) -> pd.DataFrame:
+        from .validation import validation_policy as normalize_policy
+        policy = normalize_policy(validation_policy if validation_policy is not None else self.validation_mode)
         start_ts = utc_timestamp(start)
         end_ts = utc_timestamp(end)
         frame = self.store.read(instrument, start_ts, end_ts)
         metadata = self._metadata(instrument, download=False) or {}
         report = validate_market_data(frame, instrument, start_ts, end_ts, metadata.get("holidays", []))
-        if self.validation_mode == "strict":
-            report.raise_for_errors(instrument)
-        elif not report.is_valid:
+        self.validation_reports[instrument] = report
+        LOGGER.info("[run=%s] [data=%s] Validation policy: %s; available=%d missing=%d coverage=%s%%",
+                    VALIDATION_RUN_ID.get(), instrument, policy.upper(), report.available_market_minutes,
+                    report.unexpected_missing_minutes,
+                    f"{report.coverage_percent:.4f}" if report.coverage_percent is not None else "N/A")
+        report.apply_policy(policy, instrument)
+        if policy == "trace":
+            LOGGER.info("[run=%s] [data=%s] Coverage validation: NON-BLOCKING; missing coverage accepted by TRACE",
+                        VALIDATION_RUN_ID.get(), instrument)
+        elif policy == "permissive" and not report.is_valid:
             first_gap = report.unexpected_gaps[0] if report.unexpected_gaps else None
             LOGGER.warning(
                 "[%s] permissive validation: rows=%d invalid_ohlc=%d invalid_values=%d "

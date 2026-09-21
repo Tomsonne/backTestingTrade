@@ -25,6 +25,7 @@ from app.data.base import DataCoverageError, MarketDataProvider, utc_timestamp
 from app.data.factory import create_provider
 from app.data.resampler import resample_market_data
 from app.data.validation import validate_market_data
+from app.data.gaps import TraceProvider
 from app.dxy import DXY_COMPONENTS, direct_dxy, synthetic_dxy
 from app.m1_divergence import LabelEvent, build_label_events
 from app.sessions import SessionInstance, build_session_instances, session_slice
@@ -688,10 +689,14 @@ def run_research_backtest(
     ensure_legacy_compatible(config)
     runtime = runtime_settings(settings, config)
     current = utc_timestamp(now or datetime.now(timezone.utc))
+    if config.validation.mode == "trace":
+        # Configure the run-local provider BEFORE any load, including legacy/DXY.
+        provider = TraceProvider(provider or create_provider(runtime))
     if config.strategy_version == "legacy-ab-v1" and config.preset_name in {
         "Legacy A.0", "Legacy A.1", "Legacy B.0", "Legacy B.1"
     }:
-        return _legacy_output(config, runtime, provider, current, progress)
+        output = _legacy_output(config, runtime, provider, current, progress)
+        return _attach_coverage(output, provider)
 
     provider = provider or create_provider(runtime)
     if hasattr(provider, "validation_mode"):
@@ -787,4 +792,19 @@ def run_research_backtest(
         "candle_count": candle_count,
         "research_only": True,
     }
-    return ResearchRunOutput(result, trades, rejected, analysis["records"], candle_count, warnings)
+    return _attach_coverage(ResearchRunOutput(result, trades, rejected, analysis["records"], candle_count, warnings), provider)
+
+
+def _attach_coverage(output: ResearchRunOutput, provider) -> ResearchRunOutput:
+    if not isinstance(provider, TraceProvider):
+        return output
+    output.result["validation_policy"] = "TRACE"
+    output.result["coverage"] = provider.catalog.coverage
+    keys = ("requested_start", "requested_end", "first_available_candle", "last_available_candle",
+            "expected_market_minutes", "available_market_minutes", "missing_market_minutes", "coverage_percent")
+    for symbol, report in provider.catalog.coverage.items():
+        metrics = {key: report[key] for key in keys}
+        output.stats.append({"scope": "DATA", "dimension": "coverage", "bucket": symbol, "metrics": metrics})
+        output.data_warnings.append({"instrument": symbol, "validation_policy": "TRACE", **metrics})
+    output.result["data_warnings"] = output.data_warnings
+    return output

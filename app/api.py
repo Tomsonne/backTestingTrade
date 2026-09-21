@@ -135,6 +135,8 @@ def build_api_router(settings: Settings, executor: Executor) -> APIRouter:
             "timezone": settings.timezone,
             "backtest_start": settings.backtest_start,
             "app_version": APP_VERSION,
+            "code_root": str(Path(__file__).resolve().parents[1]),
+            "validation_policies": ["strict", "trace", "permissive"],
             "mode": "RESEARCH",
             "sessions": [
                 {"name": item.name, "start": item.start.strftime("%H:%M"), "end": item.end.strftime("%H:%M")}

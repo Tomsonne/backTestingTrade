@@ -10,6 +10,7 @@ import traceback
 from .backtest import run_backtest
 from .config import Settings
 from .data.base import MarketDataProvider
+from .data.validation import VALIDATION_RUN_ID
 from .research.config import StrategyConfig
 from .research.engine import run_research_backtest
 from .storage import (
@@ -20,7 +21,7 @@ from .storage import (
 )
 
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1-trace-loading"
 LOGGER = logging.getLogger(__name__)
 _LEGACY_LOCK = Lock()
 
@@ -73,6 +74,10 @@ def execute_research_run(
         update_run_progress(settings.db_path, run_id, step, percent)
         LOGGER.info("[run=%s] %s %.0f%%", run_id, step, percent)
 
+    token = VALIDATION_RUN_ID.set(run_id)
+    LOGGER.info("[run=%s] Validation policy: %s; validation=%s; engine=%s; app_version=%s",
+                run_id, config.validation.mode.upper(), config.validation.mode.upper(),
+                run_research_backtest.__code__.co_filename, APP_VERSION)
     try:
         output = run_research_backtest(config, settings, provider=provider, progress=progress)
         progress("SAVING_RESULTS", 95)
@@ -95,3 +100,5 @@ def execute_research_run(
         )
         LOGGER.exception("[run=%s] failed: %s", run_id, exc)
         return {"status": "FAILED", "run_id": run_id, "error": str(exc)}
+    finally:
+        VALIDATION_RUN_ID.reset(token)

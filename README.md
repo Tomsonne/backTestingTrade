@@ -253,6 +253,14 @@ Il correspond à des groupes ancrés à minuit dans ce fuseau, comme avant la mi
 
 ## Validation stricte
 
+### Correction du chargement TRACE (2.0.1-trace-loading)
+
+Dans New Backtest → Execution & Validation → Validation, `trace` accepte les absences de M1 mais refuse les données invalides. Le provider reçoit explicitement la policy avant la lecture. `strict` reste bloquant pour la couverture; `permissive` conserve son comportement historique. Le détail du run affiche les minutes attendues/disponibles/manquantes, le pourcentage de couverture et les périodes demandées absentes. Le catalogue complet est conservé dans `run.json`, et les statistiques `DATA / coverage` sont exportables.
+
+Cette correction concerne seulement le chargement, la validation et la couverture : elle ne modifie pas les règles de stratégie ou la gestion des positions et ne porte pas automatiquement les autres fonctionnalités TRACE d'une autre copie du projet. Le serveur utilisé doit démarrer depuis `/Users/thomasrousseau/Desktop/trade`. `/api/config` expose `code_root`, `app_version` et les policies disponibles pour identifier la copie chargée.
+
+Voir [le diagnostic et la recette du correctif](docs/trace_loading_fix.md), notamment pourquoi les 468 696 M1 absentes correspondent surtout à des mois inexistants dans ce cache, et non à de petits trous internes.
+
 Le validateur contrôle : UTC, ordre, doublons, OHLC, NaN/prix non positifs, volumes négatifs et minutes manquantes. Les week-ends, les horaires vérifiés des instruments, la maintenance quotidienne du DXY et les jours fériés fournis dans les métadonnées Dukascopy sont classés comme fermetures attendues.
 
 Aucun `ffill()` n'est appliqué aux prix. En mode strict, une minute ouverte manquante interrompt le backtest avec la première période concernée. Le mode `permissive` existe pour l'exploration mais n'est pas recommandé pour les résultats officiels.
