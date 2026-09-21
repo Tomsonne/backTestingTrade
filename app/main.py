@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import os
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -28,6 +29,9 @@ def create_app(config: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        LOGGER.info("RiseUp startup pid=%s app_version=%s code=%s cwd=%s validation_policies=STRICT,TRACE,PERMISSIVE",
+                    os.getpid(), APP_VERSION, Path(__file__).resolve(), Path.cwd())
         init_db(settings.db_path)
         seed_presets(settings.db_path, builtin_presets())
         if settings.enable_scheduler:

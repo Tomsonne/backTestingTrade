@@ -34,6 +34,14 @@ class DataCoverageError(DataProviderError):
     """Raised when a local dataset cannot cover the requested period safely."""
 
 
+class DataIntegrityError(DataProviderError):
+    """Corrupt/unusable data, distinct from absent market minutes."""
+
+
+class InvalidValidationPolicy(ValueError):
+    """Unknown policy: never silently fall through to permissive validation."""
+
+
 class MarketDataProvider(Protocol):
     """Small provider boundary used by the backtest engine."""
 

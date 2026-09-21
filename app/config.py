@@ -105,7 +105,7 @@ class Settings:
             "dxy_source": ({"dukascopy_direct", "synthetic"}, self.dxy_source),
             "execution_price_mode": ({"mid", "bid_ask"}, self.execution_price_mode),
             "volume_mode": ({"legacy_no_volume", "dukascopy_volume"}, self.volume_mode),
-            "data_validation_mode": ({"strict", "permissive"}, self.data_validation_mode),
+            "data_validation_mode": ({"strict", "trace", "permissive"}, self.data_validation_mode),
         }
         for name, (choices, value) in allowed.items():
             if value not in choices:

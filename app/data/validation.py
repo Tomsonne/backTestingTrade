@@ -3,14 +3,22 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Iterable
+from contextvars import ContextVar
 
 import numpy as np
 import pandas as pd
 
-from .base import DataCoverageError, utc_timestamp
+from .base import DataCoverageError, DataIntegrityError, InvalidValidationPolicy, utc_timestamp
 
 
 PRICE_PREFIXES = ("bid", "ask", "mid")
+VALIDATION_RUN_ID = ContextVar("validation_run_id", default="-")
+
+
+def validation_policy(value: str) -> str:
+    if not isinstance(value, str) or value.lower() not in {"strict", "trace", "permissive"}:
+        raise InvalidValidationPolicy(f"Unknown validation policy: {value!r}")
+    return value.lower()
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,12 @@ class ValidationReport:
     expected_market_closed_minutes: int = 0
     expected_holiday_minutes: int = 0
     expected_provider_gap_minutes: int = 0
+    requested_start: str | None = None
+    requested_end: str | None = None
+    first_available_candle: str | None = None
+    last_available_candle: str | None = None
+    expected_market_minutes: int = 0
+    available_market_minutes: int = 0
 
     @property
     def unexpected_missing_minutes(self) -> int:
@@ -53,9 +67,36 @@ class ValidationReport:
         result = asdict(self)
         result["is_valid"] = self.is_valid
         result["unexpected_missing_minutes"] = self.unexpected_missing_minutes
+        result["missing_market_minutes"] = self.unexpected_missing_minutes
+        result["coverage_percent"] = self.coverage_percent
         return result
 
+    @property
+    def coverage_percent(self) -> float | None:
+        return 100 * self.available_market_minutes / self.expected_market_minutes if self.expected_market_minutes else None
+
+    def apply_policy(self, policy: str, instrument: str) -> None:
+        policy = validation_policy(policy)
+        if policy == "strict":
+            self.raise_for_errors(instrument)
+        elif policy == "trace":
+            self.raise_for_non_coverage_errors(instrument)
+        # PERMISSIVE retains its historical warning-only behavior.
+
+    def raise_for_non_coverage_errors(self, instrument: str) -> None:
+        details = []
+        for attribute, label in (("duplicate_timestamps", "duplicate timestamps"),
+                                 ("out_of_order_timestamps", "out-of-order timestamps"),
+                                 ("invalid_ohlc_rows", "invalid OHLC rows"),
+                                 ("invalid_value_rows", "invalid value/timestamp rows")):
+            count = getattr(self, attribute)
+            if count:
+                details.append(f"{count} {label}")
+        if details:
+            raise DataIntegrityError(f"Backtest aborted: {instrument} DATA INTEGRITY ERROR: " + "; ".join(details))
+
     def raise_for_errors(self, instrument: str) -> None:
+        self.raise_for_non_coverage_errors(instrument)
         if self.is_valid:
             return
         details = []
@@ -177,6 +218,10 @@ def validate_market_data(
     """Validate canonical OHLCV data without filling or inventing candles."""
 
     report = ValidationReport(rows=len(frame))
+    if start is not None:
+        report.requested_start = utc_timestamp(start).isoformat()
+    if end is not None:
+        report.requested_end = utc_timestamp(end).isoformat()
     if frame.empty:
         if start is not None and end is not None:
             expected = _minute_index(utc_timestamp(start), utc_timestamp(end))
@@ -184,6 +229,7 @@ def validate_market_data(
                 expected, instrument, holidays
             )
             open_expected = expected[open_mask]
+            report.expected_market_minutes = len(open_expected)
             report.unexpected_gaps = _gaps_from_missing(open_expected)
             report.expected_market_closed_minutes = int(market_closed.sum())
             report.expected_holiday_minutes = int(holiday.sum())
@@ -191,6 +237,9 @@ def validate_market_data(
 
     if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.tz is None:
         report.invalid_value_rows = len(frame)
+        return report
+    if frame.index.hasnans:
+        report.invalid_value_rows = int(frame.index.isna().sum())
         return report
 
     report.duplicate_timestamps = int(frame.index.duplicated(keep=False).sum())
@@ -248,8 +297,15 @@ def validate_market_data(
     expected = _minute_index(requested_start, requested_end)
     open_mask, market_closed, holiday = _expected_minute_classes(expected, instrument, holidays)
     open_expected = expected[open_mask]
+    report.requested_start = requested_start.isoformat()
+    report.requested_end = requested_end.isoformat()
+    report.expected_market_minutes = len(open_expected)
     report.expected_market_closed_minutes = int(market_closed.sum())
     report.expected_holiday_minutes = int(holiday.sum())
     actual = frame.index[(frame.index >= requested_start) & (frame.index < requested_end)].unique()
+    report.available_market_minutes = len(open_expected.intersection(actual))
+    if len(actual):
+        report.first_available_candle = actual.min().isoformat()
+        report.last_available_candle = actual.max().isoformat()
     report.unexpected_gaps = _gaps_from_missing(open_expected.difference(actual))
     return report
