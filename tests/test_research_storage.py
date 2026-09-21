@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -11,6 +13,7 @@ from app.storage import (
     delete_preset,
     get_run,
     get_stats,
+    init_db,
     list_presets,
     list_rejected,
     list_runs,
@@ -19,6 +22,57 @@ from app.storage import (
     seed_presets,
     update_run_progress,
 )
+
+
+@pytest.mark.parametrize("existing_state", [False, True])
+def test_init_db_rolls_back_partial_schema_on_ddl_failure(tmp_path: Path, monkeypatch, existing_state):
+    database = tmp_path / "migration.sqlite3"
+    schema_query = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+    with closing(sqlite3.connect(database)) as connection:
+        if existing_state:
+            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            connection.execute("INSERT INTO state VALUES ('latest', 'historical result')")
+            connection.commit()
+        original_schema = connection.execute(schema_query).fetchall()
+
+    real_connect = sqlite3.connect
+    attempted_tables = []
+
+    def fail_middle_ddl(action, name, *unused):
+        if action == sqlite3.SQLITE_CREATE_TABLE:
+            attempted_tables.append(name)
+            if name == "trade_data_quality":
+                return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def failing_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.set_authorizer(fail_middle_ddl)
+        return connection
+
+    with monkeypatch.context() as patch:
+        patch.setattr("app.storage.sqlite3.connect", failing_connect)
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            init_db(database)
+
+    assert "run_data_gaps" in attempted_tables
+    assert attempted_tables[-1] == "trade_data_quality"
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute(schema_query).fetchall() == original_schema
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        if existing_state:
+            assert connection.execute("SELECT * FROM state").fetchall() == [("latest", "historical result")]
+
+    # A failed migration can be retried, then repeated without changing the schema.
+    init_db(database)
+    with closing(sqlite3.connect(database)) as connection:
+        migrated_schema = connection.execute(schema_query).fetchall()
+    init_db(database)
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute(schema_query).fetchall() == migrated_schema
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        if existing_state:
+            assert connection.execute("SELECT * FROM state").fetchall() == [("latest", "historical result")]
 
 
 def test_preset_crud_preserves_builtins(tmp_path: Path):

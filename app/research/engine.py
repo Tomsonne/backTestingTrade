@@ -4,9 +4,11 @@ from collections import Counter
 from bisect import bisect_left
 from copy import copy
 from dataclasses import dataclass
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
 from typing import Any, Callable
+from uuid import uuid5, NAMESPACE_URL
 
 import pandas as pd
 
@@ -25,7 +27,7 @@ from app.data.base import DataCoverageError, MarketDataProvider, utc_timestamp
 from app.data.factory import create_provider
 from app.data.resampler import resample_market_data
 from app.data.validation import validate_market_data
-from app.data.gaps import TraceProvider
+from app.data.gaps import GapCatalog, TraceProvider, MINUTE
 from app.dxy import DXY_COMPONENTS, direct_dxy, synthetic_dxy
 from app.m1_divergence import LabelEvent, build_label_events
 from app.sessions import SessionInstance, build_session_instances, session_slice
@@ -34,6 +36,7 @@ from app.zones import Zone, build_zones
 from .analysis import build_analysis
 from .config import StrategyConfig
 from .presets import ensure_legacy_compatible
+from .data_quality import annotate_candidate, setup_events, quality_fields, quality_report
 
 
 Progress = Callable[[str, float], None]
@@ -342,6 +345,7 @@ def _build_candidates(
     sessions = [item for item in sessions if not session_slice(mid, item).empty]
     candidates: list[Candidate] = []
     rejected: list[dict[str, Any]] = []
+    contexts = {}
 
     for index, current in enumerate(sessions):
         if current.trade_date.weekday() >= 5:
@@ -351,8 +355,10 @@ def _build_candidates(
         previous = _previous_session(sessions, index, config)
         if previous is None:
             continue
+        contexts[(current.trade_date.isoformat(), current.name)] = (previous, current)
         data_end = mid.index.max() + pd.Timedelta(minutes=1)
-        if previous.start < mid.index.min() or previous.end > data_end:
+        outside_request = config.validation.mode == "trace" and (previous.start < runtime.gap_catalog.start or previous.end > runtime.gap_catalog.end)
+        if (config.validation.mode != "trace" or outside_request) and (previous.start < mid.index.min() or previous.end > data_end):
             rejected.append(_rejection(pair, current, "PREVIOUS_SESSION_DATA_MISSING", [
                 _trace(
                     "Previous session levels",
@@ -389,7 +395,12 @@ def _build_candidates(
             )]
             dxy_at_break = None
             if config.divergence.enabled:
-                if dxy is None or dxy_extrema is None or _dxy_has_gap(dxy, current.start, break_time + pd.Timedelta(minutes=1)):
+                if config.validation.mode == "trace" and (dxy is None or dxy_extrema is None or dxy[(dxy.index >= current.start) & (dxy.index < break_time + MINUTE)].empty):
+                    rejected.append(_rejection(pair, current, "DXY_DATA_MISSING", trace + [
+                        _trace("DXY data", "INDETERMINATE", "No usable DXY context; no values invented")
+                    ], direction, break_time=break_time.isoformat()))
+                    continue
+                if dxy is None or dxy_extrema is None or (config.validation.mode != "trace" and _dxy_has_gap(dxy, current.start, break_time + pd.Timedelta(minutes=1))):
                     behavior = config.divergence.dxy_gap_behavior
                     trace.append(_trace("DXY data", "FAIL" if behavior == "reject" else "WARN", "Missing DXY M1 coverage"))
                     if behavior == "reject":
@@ -533,6 +544,28 @@ def _build_candidates(
                 break
             if not accepted and last_failure:
                 rejected.append(last_failure)
+    if config.validation.mode == "trace":
+        catalog = runtime.gap_catalog
+        for candidate in candidates:
+            previous, current = contexts[(candidate.trade_date, candidate.session)]
+            annotate_candidate(candidate, catalog, previous, current,
+                               trigger=config.trigger.mode != "NONE", zones=bool(config.zones.timeframes),
+                               dxy=config.divergence.enabled, history_index=mid.index,
+                               zone_timeframes=config.zones.timeframes)
+        for setup in rejected:
+            previous, current = contexts[(setup["trade_date"], setup["session"])]
+            at = pd.Timestamp(setup.get("entry_time") or setup.get("label_time") or setup.get("break_time") or current.end)
+            if setup.get("break_time") and not setup.get("entry_time"):
+                at += MINUTE
+            events = setup_events(catalog, pair, previous, current, at,
+                                  trigger=config.trigger.mode != "NONE" and setup["reason"] in {"NO_LABEL", "LABEL_TOO_LATE", "NO_ZONE", "ZONE_WRONG_DIRECTION", "ENTRY_OUTSIDE_SESSION"},
+                                  zones=bool(config.zones.timeframes) and setup["reason"] in {"NO_ZONE", "ZONE_WRONG_DIRECTION"},
+                                  dxy=config.divergence.enabled and setup["reason"] != "NO_PAIR_BREAK",
+                                  label_time=setup.get("label_time"), history_index=mid.index)
+            status = "INDETERMINATE" if setup["reason"] in {"DXY_DATA_MISSING", "PREVIOUS_SESSION_DATA_MISSING"} else None
+            setup.update(quality_fields(events, status))
+            setup["setup_id"] = str(uuid5(NAMESPACE_URL, json.dumps(
+                {k: setup.get(k) for k in ("pair", "trade_date", "session", "direction", "reason", "break_time", "label_time")}, sort_keys=True)))
     return candidates, rejected
 
 
@@ -541,6 +574,8 @@ def _risk_rejection(candidate: Candidate, reason: str, detail: str) -> dict[str,
         "pair": candidate.pair, "trade_date": candidate.trade_date,
         "session": candidate.session, "direction": candidate.direction, "reason": reason,
         "entry_time": candidate.entry_time,
+        "setup_id": candidate.setup_id,
+        **(quality_fields(candidate.missing_data_events) if candidate.data_quality_status else {}),
         "trace": list(candidate.trace) + [_trace("Risk management", "FAIL", detail)],
     }
 
@@ -561,6 +596,9 @@ def _apply_risk(
     by_day: dict[str, list[dict[str, Any]]] = {}
 
     for candidate in ordered:
+        if any(item["outcome"] == "INDETERMINATE" for item in trades):
+            rejected.append(_risk_rejection(candidate, "POSITION_INDETERMINATE", "Cannot determine whether a previous position has closed"))
+            continue
         day_trades = by_day.setdefault(candidate.trade_date, [])
         if len(day_trades) >= config.risk.max_trades_per_day:
             rejected.append(_risk_rejection(candidate, "DAILY_LIMIT_REACHED", "Maximum trades/day reached"))
@@ -583,17 +621,17 @@ def _apply_risk(
             continue
         trade = simulate_trade(runtime, candidate, raw[candidate.pair])
         trade_number = len(day_trades) + 1
-        return_pct = trade["r_multiple"] * risk
+        return_pct = trade["r_multiple"] * risk if trade["r_multiple"] is not None else None
         before = equity
-        equity *= 1 + return_pct / 100
+        equity *= 1 + (return_pct or 0) / 100
         trade.update(
             trade_number_day=trade_number,
             risk_pct=risk,
             equity_before=before,
             return_pct=return_pct,
             equity_after=equity,
-            pnl=equity - before,
-            exit_reason=trade["outcome"],
+            pnl=equity - before if return_pct is not None else None,
+            exit_reason=trade.get("exit_reason", trade["outcome"]),
             trace=list(candidate.trace) + [_trace("Simulation", "PASS", trade["outcome"])],
         )
         trades.append(trade)
@@ -659,6 +697,12 @@ def _legacy_output(
     analysis = build_analysis(trades, config)
     legacy_summary = next((item for item in result["summary"] if item["variant"] == variant), {})
     summary = {**analysis["overall"], **legacy_summary}
+    if config.validation.mode == "trace":
+        selected_setups = [s for s in result.get("setup_quality", []) if s["variant"] == variant]
+        result["setup_quality"] = selected_setups
+        result["data_quality_report"] = quality_report(
+            result.get("data_quality_report", {}).get("physical_gaps", []), selected_setups, trades)
+        summary = analysis["overall"]
     research_result = {
         **result,
         "name": config.name,
@@ -675,7 +719,7 @@ def _legacy_output(
         "rejected_counts": {},
     }
     return ResearchRunOutput(
-        research_result, trades, [], analysis["records"], int(result.get("candle_count", 0)), []
+        research_result, trades, [], analysis["records"], int(result.get("candle_count", 0)), result.get("data_warnings", [])
     )
 
 
@@ -689,20 +733,25 @@ def run_research_backtest(
     ensure_legacy_compatible(config)
     runtime = runtime_settings(settings, config)
     current = utc_timestamp(now or datetime.now(timezone.utc))
-    if config.validation.mode == "trace":
-        # Configure the run-local provider BEFORE any load, including legacy/DXY.
-        provider = TraceProvider(provider or create_provider(runtime))
     if config.strategy_version == "legacy-ab-v1" and config.preset_name in {
         "Legacy A.0", "Legacy A.1", "Legacy B.0", "Legacy B.1"
     }:
+        if config.validation.mode == "trace":
+            # Configure the run-local provider before legacy and DXY source loads.
+            start = _strategy_timestamp(config.period.start.isoformat(), runtime)
+            end = _strategy_timestamp((config.period.end + timedelta(days=1)).isoformat(), runtime)
+            provider = TraceProvider(provider or create_provider(runtime), GapCatalog(start, end))
         output = _legacy_output(config, runtime, provider, current, progress)
         return _attach_coverage(output, provider)
 
     provider = provider or create_provider(runtime)
-    if hasattr(provider, "validation_mode"):
+    if config.validation.mode != "trace" and hasattr(provider, "validation_mode"):
         provider.validation_mode = config.validation.mode  # type: ignore[attr-defined]
     start = _strategy_timestamp(config.period.start.isoformat(), runtime)
     end = _strategy_timestamp((config.period.end + timedelta(days=1)).isoformat(), runtime)
+    if config.validation.mode == "trace":
+        runtime.gap_catalog = GapCatalog(start, end)
+        provider = TraceProvider(provider, runtime.gap_catalog)
 
     _progress(progress, "LOADING_DATA", 10)
     raw = {pair: provider.get(pair, start, end, "1min") for pair in config.instruments.pairs}
@@ -745,6 +794,16 @@ def run_research_backtest(
             candle_count += loaded
             dxy_source = "synthetic"
             revision_symbols.extend(DXY_COMPONENTS)
+
+    if config.validation.mode == "trace":
+        runtime.gap_catalog.dxy_symbols = (
+            [config.instruments.dxy_instrument] if dxy_source == "dukascopy_direct"
+            else list(DXY_COMPONENTS) if dxy_source != "disabled" else []
+        )
+        warnings = [{"instrument": symbol, "rows": report["rows"],
+                     "unexpected_missing_minutes": report["unexpected_missing_minutes"],
+                     "gap_event_count": len(report["unexpected_gaps"])}
+                    for symbol, report in runtime.gap_catalog.reports.items() if not report["is_valid"]]
 
     _progress(progress, "BUILDING_SESSIONS", 32)
     _progress(progress, "BUILDING_ZONES", 42)
@@ -791,6 +850,9 @@ def run_research_backtest(
         "data_warnings": warnings,
         "candle_count": candle_count,
         "research_only": True,
+        **({"data_quality_report": quality_report(runtime.gap_catalog.physical_gaps(),
+               [asdict(c) for c in candidates] + [s for s in rejected if s not in risk_rejected], trades),
+            "setup_quality": [asdict(c) for c in candidates] + [s for s in rejected if s not in risk_rejected]} if config.validation.mode == "trace" else {}),
     }
     return _attach_coverage(ResearchRunOutput(result, trades, rejected, analysis["records"], candle_count, warnings), provider)
 

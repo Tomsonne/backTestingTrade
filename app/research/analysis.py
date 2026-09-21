@@ -19,6 +19,7 @@ def _streak(values: list[bool]) -> int:
 
 
 def trade_metrics(trades: list[dict[str, Any]], starting_equity: float) -> dict[str, Any]:
+    trades = [t for t in trades if t.get("outcome") != "INDETERMINATE" and t.get("data_quality_status") != "INDETERMINATE"]
     if not trades:
         return {
             "trades": 0, "wins": 0, "losses": 0, "timeouts": 0, "win_rate": None,
@@ -67,6 +68,7 @@ def trade_metrics(trades: list[dict[str, Any]], starting_equity: float) -> dict[
 
 
 def equity_curve(trades: list[dict[str, Any]], starting_equity: float) -> list[dict[str, Any]]:
+    trades = [t for t in trades if t.get("outcome") != "INDETERMINATE"]
     curve = [{"timestamp": None, "equity": starting_equity}]
     for item in sorted(trades, key=lambda row: row.get("exit_time", "")):
         curve.append(
@@ -157,12 +159,24 @@ def build_analysis(trades: list[dict[str, Any]], config: StrategyConfig) -> dict
         for item in records if item["scope"] == "ALL" and item["dimension"] == "month"
     ]
     overall = records[0]["metrics"]
+    quality_comparison = None
+    if config.validation.mode == "trace":
+        clean = [t for t in trades if t.get("data_quality_status") == "COMPLETE"]
+        clean_metrics = trade_metrics(clean, equity)
+        records.append({"scope": "CLEAN", "dimension": "overall", "bucket": "all", "metrics": clean_metrics})
+        quality_comparison = {
+            "ALL": overall, "CLEAN": clean_metrics,
+            "indeterminate_count": sum(t.get("data_quality_status") == "INDETERMINATE" for t in trades),
+            "total_trades": len(trades),
+            "note": "CLEAN is a COMPLETE-only cohort, compounded from starting equity with original risk percentages; not a rerun of daily selection. INDETERMINATE PnL is excluded, not zero.",
+        }
     return {
         "overall": overall,
         "equity_curve": equity_curve(trades, equity),
         "monthly_r": monthly,
         "scope_metrics": scope_metrics,
         "records": records,
+        **({"quality_comparison": quality_comparison} if quality_comparison is not None else {}),
     }
 
 

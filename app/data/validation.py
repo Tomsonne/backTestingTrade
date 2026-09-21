@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from typing import Iterable
 from contextvars import ContextVar
@@ -46,6 +46,11 @@ class ValidationReport:
     last_available_candle: str | None = None
     expected_market_minutes: int = 0
     available_market_minutes: int = 0
+    provider_confirmed_gaps: list[Gap] = field(default_factory=list)
+
+    @property
+    def unconfirmed_missing_minutes(self) -> int:
+        return self.unexpected_missing_minutes - self.expected_provider_gap_minutes
 
     @property
     def unexpected_missing_minutes(self) -> int:
@@ -69,6 +74,7 @@ class ValidationReport:
         result["unexpected_missing_minutes"] = self.unexpected_missing_minutes
         result["missing_market_minutes"] = self.unexpected_missing_minutes
         result["coverage_percent"] = self.coverage_percent
+        result["unconfirmed_missing_minutes"] = self.unconfirmed_missing_minutes
         return result
 
     @property
@@ -114,10 +120,29 @@ class ValidationReport:
                 f"{self.unexpected_missing_minutes} missing M1 candle(s), first gap "
                 f"{first.start} to {first.end}"
             )
+        if self.expected_provider_gap_minutes:
+            details.append(f"{self.expected_provider_gap_minutes} PROVIDER_CONFIRMED_MISSING; price path remains unknown")
+        guidance = "Run historical data repair first."
+        if self.expected_provider_gap_minutes:
+            guidance = "Confirmed provider gaps are not retried automatically; STRICT still requires complete observations."
+            if self.unconfirmed_missing_minutes:
+                guidance += " Repair the remaining unconfirmed gaps."
         raise DataCoverageError(
             f"Backtest aborted: {instrument} " + "; ".join(details) + ". "
-            "Run historical data repair first."
+            + guidance
         )
+
+
+def classify_provider_missing(report: ValidationReport, timestamps: Iterable) -> ValidationReport:
+    """Annotate a subset of missing open minutes; never exempt it from STRICT/TRACE."""
+    confirmed = pd.DatetimeIndex([utc_timestamp(t) for t in timestamps], tz="UTC").unique().sort_values()
+    classified = []
+    for gap in report.unexpected_gaps:
+        subset = confirmed[(confirmed >= pd.Timestamp(gap.start)) & (confirmed <= pd.Timestamp(gap.end))]
+        classified.extend(replace(g, classification="PROVIDER_CONFIRMED_MISSING") for g in _gaps_from_missing(subset))
+    report.provider_confirmed_gaps = classified
+    report.expected_provider_gap_minutes = sum(g.missing_minutes for g in classified)
+    return report
 
 
 def _holiday_mask(index: pd.DatetimeIndex, holidays: Iterable[dict] | None) -> np.ndarray:

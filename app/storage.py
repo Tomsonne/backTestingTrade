@@ -64,8 +64,11 @@ def connect(path: Path) -> Iterator[sqlite3.Connection]:
 def init_db(path: Path) -> None:
     with connect(path) as connection:
         connection.execute("PRAGMA journal_mode = WAL")
+        # executescript() commits any pending transaction before running its SQL.
+        # Begin inside the script; connect() commits or rolls back the whole schema.
         connection.executescript(
             """
+            BEGIN;
             CREATE TABLE IF NOT EXISTS state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -158,6 +161,54 @@ def init_db(path: Path) -> None:
                 metrics_json TEXT NOT NULL,
                 PRIMARY KEY(run_id, scope, dimension, bucket)
             );
+            CREATE TABLE IF NOT EXISTS run_data_gaps (
+                run_id TEXT NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+                gap_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                gap_start TEXT NOT NULL,
+                gap_end TEXT NOT NULL,
+                missing_count INTEGER NOT NULL CHECK(missing_count > 0),
+                PRIMARY KEY(run_id, gap_id)
+            );
+            CREATE TABLE IF NOT EXISTS trade_data_quality (
+                run_id TEXT NOT NULL,
+                trade_id TEXT NOT NULL,
+                data_quality_status TEXT NOT NULL,
+                missing_candles_count INTEGER NOT NULL,
+                PRIMARY KEY(run_id, trade_id),
+                FOREIGN KEY(run_id,trade_id) REFERENCES trades(run_id,trade_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS setup_data_quality (
+                run_id TEXT NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+                setup_id TEXT NOT NULL,
+                data_quality_status TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                PRIMARY KEY(run_id, setup_id)
+            );
+            CREATE TABLE IF NOT EXISTS missing_data_events (
+                run_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                gap_id TEXT NOT NULL,
+                trade_id TEXT,
+                setup_id TEXT,
+                affected_components_json TEXT NOT NULL,
+                first_available_timestamp TEXT,
+                gap_resolution TEXT,
+                outcome_source TEXT,
+                details_json TEXT NOT NULL,
+                PRIMARY KEY(run_id, event_id),
+                CHECK((trade_id IS NULL) != (setup_id IS NULL)),
+                FOREIGN KEY(run_id,gap_id) REFERENCES run_data_gaps(run_id,gap_id) ON DELETE CASCADE,
+                FOREIGN KEY(run_id,trade_id) REFERENCES trades(run_id,trade_id) ON DELETE CASCADE,
+                FOREIGN KEY(run_id,setup_id) REFERENCES setup_data_quality(run_id,setup_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_missing_events_trade ON missing_data_events(run_id,trade_id);
+            CREATE INDEX IF NOT EXISTS idx_missing_events_setup ON missing_data_events(run_id,setup_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_missing_event_trade_gap
+                ON missing_data_events(run_id,trade_id,gap_id) WHERE trade_id IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_missing_event_setup_gap
+                ON missing_data_events(run_id,setup_id,gap_id) WHERE setup_id IS NOT NULL;
             """
         )
 
@@ -353,9 +404,13 @@ def save_run_output(
         connection.execute("DELETE FROM trades WHERE run_id=?", (run_id,))
         connection.execute("DELETE FROM rejected_setups WHERE run_id=?", (run_id,))
         connection.execute("DELETE FROM run_stats WHERE run_id=?", (run_id,))
+        connection.execute("DELETE FROM setup_data_quality WHERE run_id=?", (run_id,))
+        connection.execute("DELETE FROM run_data_gaps WHERE run_id=?", (run_id,))
+        stored_trades, stored_rejected = [], []
         for sequence, trade in enumerate(trades):
             trade_id = str(trade.get("trade_id") or uuid4())
             payload = dict(trade, trade_id=trade_id, backtest_run_id=run_id)
+            stored_trades.append(payload)
             connection.execute(
                 """INSERT INTO trades(
                     run_id,trade_id,sequence,trade_date,pair,direction,session,previous_session,
@@ -374,6 +429,7 @@ def save_run_output(
         for sequence, setup in enumerate(rejected):
             setup_id = str(setup.get("setup_id") or uuid4())
             payload = dict(setup, setup_id=setup_id, backtest_run_id=run_id)
+            stored_rejected.append(payload)
             connection.execute(
                 """INSERT INTO rejected_setups(
                     run_id,setup_id,sequence,trade_date,pair,direction,session,reason,trace_json,data_json
@@ -384,6 +440,8 @@ def save_run_output(
                     _json(payload.get("trace", [])), _json(payload),
                 ),
             )
+        if result.get("data_quality_report") is not None:
+            _save_data_quality(connection, run_id, result, stored_trades, stored_rejected)
         for item in stats:
             connection.execute(
                 "INSERT INTO run_stats(run_id,scope,dimension,bucket,metrics_json) VALUES(?,?,?,?,?)",
@@ -393,6 +451,49 @@ def save_run_output(
             "UPDATE backtest_runs SET candle_count=?,data_warnings_json=?,result_json=? WHERE id=?",
             (int(candle_count), _json(data_warnings), _json(result), run_id),
         )
+
+
+def _save_data_quality(connection, run_id, result, trades, rejected):
+    for gap in result["data_quality_report"].get("physical_gaps", []):
+        connection.execute("INSERT INTO run_data_gaps VALUES(?,?,?,?,?,?,?)", (
+            run_id, gap["gap_id"], gap["symbol"], gap["timeframe"], gap["gap_start"], gap["gap_end"], gap["missing_count"]))
+    def events(payload, *, trade_id=None, setup_id=None):
+        for event in payload.get("missing_data_events", []):
+            connection.execute("INSERT INTO missing_data_events VALUES(?,?,?,?,?,?,?,?,?,?)", (
+                run_id, str(uuid4()), event["gap_id"], trade_id, setup_id,
+                _json(event["affected_components"]), event.get("first_available_timestamp"),
+                event.get("gap_resolution"), event.get("outcome_source"), _json(event)))
+    setups = {}
+    for setup in [*result.get("setup_quality", []), *rejected]:
+        if setup.get("data_quality_status"):
+            # Deterministic fallback deduplicates the same rejected setup exposed
+            # in the run report and the rejected journal.
+            key = (setup.get("setup_id") or _json({k: v for k, v in setup.items() if k not in {"backtest_run_id", "setup_id"}}))
+            setups[key] = setup
+    seen = set()
+    for setup in setups.values():
+        identity = _json({k: v for k, v in setup.items() if k not in {"backtest_run_id", "setup_id"}})
+        if identity in seen:
+            continue
+        seen.add(identity)
+        setup_id = setup.get("setup_id") or str(uuid4())
+        connection.execute("INSERT INTO setup_data_quality VALUES(?,?,?,?)", (
+            run_id, setup_id, setup["data_quality_status"], _json(dict(setup, setup_id=setup_id))))
+        events(setup, setup_id=setup_id)
+    for trade in trades:
+        if trade.get("data_quality_status"):
+            connection.execute("INSERT INTO trade_data_quality VALUES(?,?,?,?)", (
+                run_id, trade["trade_id"], trade["data_quality_status"], trade.get("missing_candles_count", 0)))
+            events(trade, trade_id=trade["trade_id"])
+
+
+def list_missing_data_events(path: Path, run_id: str) -> list[dict[str, Any]]:
+    init_db(path)
+    with connect(path) as connection:
+        rows = connection.execute(
+            "SELECT event_id,trade_id,setup_id,details_json FROM missing_data_events WHERE run_id=? ORDER BY rowid", (run_id,)).fetchall()
+    return [{**_loads(row["details_json"], {}), "event_id": row["event_id"],
+             "trade_id": row["trade_id"], "setup_id": row["setup_id"]} for row in rows]
 
 
 def _run_row(row: sqlite3.Row, include_payload: bool = False) -> dict[str, Any]:

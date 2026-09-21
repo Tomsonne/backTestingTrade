@@ -21,7 +21,7 @@ from .storage import (
 )
 
 
-APP_VERSION = "2.0.1-trace-loading"
+APP_VERSION = "2.1.0"
 LOGGER = logging.getLogger(__name__)
 _LEGACY_LOCK = Lock()
 
