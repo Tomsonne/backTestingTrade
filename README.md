@@ -1,5 +1,7 @@
 # RiseUp Trading Research Lab V2
 
+[![tests](https://github.com/Tomsonne/backTestingTrade/actions/workflows/tests.yml/badge.svg)](https://github.com/Tomsonne/backTestingTrade/actions/workflows/tests.yml)
+
 RiseUp est un laboratoire local de recherche quantitative Forex permettant de configurer, exécuter, expliquer, conserver et comparer des backtests.
 
 Le projet utilise principalement :
